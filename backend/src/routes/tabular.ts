@@ -193,10 +193,6 @@ tabularRouter.post("/", requireAuth, async (req, res) => {
         if (!access.ok)
             return void res.status(404).json({ detail: "Project not found" });
     }
-    // Drop any document_ids the caller can't access. Without this filter a
-    // user can stuff foreign UUIDs into document_ids, then call /generate
-    // or /regenerate-cell to read those documents' bytes back through the
-    // LLM (CWE-639).
     const allowedDocumentIds = Array.isArray(document_ids)
         ? await filterAccessibleDocumentIds(
               document_ids,
@@ -515,9 +511,6 @@ tabularRouter.patch("/:reviewId", requireAuth, async (req, res) => {
             const existingDocIds = (existingCells ?? []).map(
                 (cell) => cell.document_id,
             );
-            // Drop any newly-added doc_ids the caller can't read; preserve
-            // already-attached docs so a non-owner collaborator's PATCH
-            // doesn't accidentally orphan cells they can't directly access.
             const existingDocIdSet = new Set(existingDocIds);
             const newDocCandidates = requestedDocIds.filter(
                 (id) => !existingDocIdSet.has(id),
@@ -687,9 +680,6 @@ tabularRouter.post(
         if (!column)
             return void res.status(400).json({ detail: "Column not found" });
 
-        // Defense-in-depth — refuse to extract bytes for a document the
-        // caller can't read, even if a stale tabular_cells row points at it
-        // from before the access filter was added (CWE-639).
         const docAllowed = await filterAccessibleDocumentIds(
             [document_id],
             userId,
@@ -804,21 +794,19 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
         cellMap.set(`${cell.document_id}:${cell.column_index}`, cell);
 
     const docIds = [...new Set((cells ?? []).map((c) => c.document_id))];
-    // Same defense-in-depth as /regenerate-cell — filter to docs the caller
-    // can actually read, so legacy cells planted before the access check
-    // can't be coerced into running an LLM extraction (CWE-639).
     const allowedDocIds = new Set(
         await filterAccessibleDocumentIds(docIds, userId, userEmail, db),
     );
     let docs: Record<string, unknown>[] = [];
     if (docIds.length > 0) {
         const filteredIds = docIds.filter((id) => allowedDocIds.has(id));
-        const { data } = filteredIds.length > 0
-            ? await db
-                  .from("documents")
-                  .select("id, filename, file_type, page_count")
-                  .in("id", filteredIds)
-            : { data: [] as Record<string, unknown>[] };
+        const { data } =
+            filteredIds.length > 0
+                ? await db
+                      .from("documents")
+                      .select("id, filename, file_type, page_count")
+                      .in("id", filteredIds)
+                : { data: [] as Record<string, unknown>[] };
         docs = data ?? [];
     } else if (review.project_id) {
         const { data } = await db

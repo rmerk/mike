@@ -120,14 +120,11 @@ export async function ensureReviewAccess(
 }
 
 /**
- * Filter a list of document IDs down to those the caller is actually
- * authorised to read — owners pass, plus any document whose `project_id`
- * the caller has access to (own project or `shared_with` member).
+ * Filter user-supplied document IDs down to documents the caller can read.
  *
- * The tabular-review routes accept user-supplied `document_ids` from
- * request bodies; without this filter an attacker who has any review of
- * their own can plant arbitrary doc UUIDs and have the server fetch + run
- * an LLM extraction over their bytes (CWE-639).
+ * Tabular review routes accept document IDs from request bodies. Without this
+ * check, a caller with access to any review could attach arbitrary document
+ * UUIDs and later cause /generate or /regenerate-cell to extract those bytes.
  */
 export async function filterAccessibleDocumentIds(
     documentIds: string[],
@@ -146,18 +143,22 @@ export async function filterAccessibleDocumentIds(
         project_id: string | null;
     }[];
     if (rows.length === 0) return [];
+
     const accessibleProjectIds = new Set(
         await listAccessibleProjectIds(userId, userEmail, db),
     );
-    const out: string[] = [];
-    for (const d of rows) {
-        if (d.user_id === userId) {
-            out.push(d.id);
-        } else if (d.project_id && accessibleProjectIds.has(d.project_id)) {
-            out.push(d.id);
+    const allowed: string[] = [];
+    for (const doc of rows) {
+        if (doc.user_id === userId) {
+            allowed.push(doc.id);
+        } else if (
+            doc.project_id &&
+            accessibleProjectIds.has(doc.project_id)
+        ) {
+            allowed.push(doc.id);
         }
     }
-    return out;
+    return allowed;
 }
 
 /**
