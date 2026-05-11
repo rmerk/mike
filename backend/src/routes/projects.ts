@@ -10,6 +10,7 @@ import { downloadFile, uploadFile, storageKey } from "../lib/storage";
 import { docxToPdf, convertedPdfKey } from "../lib/convert";
 import { checkProjectAccess } from "../lib/access";
 import { singleFileUpload } from "../lib/upload";
+import { getProjectTemplate } from "../lib/builtinProjectTemplates";
 
 export const projectsRouter = Router();
 const ALLOWED_TYPES = new Set(["pdf", "docx", "doc"]);
@@ -74,27 +75,116 @@ projectsRouter.get("/", requireAuth, async (req, res) => {
 // POST /projects
 projectsRouter.post("/", requireAuth, async (req, res) => {
   const userId = res.locals.userId as string;
-  const { name, cm_number, shared_with } = req.body as {
+  const { name, cm_number, shared_with, template_id } = req.body as {
     name: string;
     cm_number?: string;
     shared_with?: string[];
+    template_id?: string;
   };
   if (!name?.trim())
     return void res.status(400).json({ detail: "name is required" });
 
+  // Validate template_id (if provided) against the in-process registry. Empty
+  // strings are treated as null (no template). Unknown ids → 400 so the
+  // frontend can show a clear error without a half-created project.
+  const templateIdNormalized = template_id?.trim() || null;
+  const template = templateIdNormalized
+    ? getProjectTemplate(templateIdNormalized)
+    : undefined;
+  if (templateIdNormalized && !template)
+    return void res
+      .status(400)
+      .json({ detail: `unknown template_id: ${templateIdNormalized}` });
+
   const db = createServerSupabase();
-  const { data, error } = await db
+  const { data: project, error: projectError } = await db
     .from("projects")
     .insert({
       user_id: userId,
       name: name.trim(),
       cm_number: cm_number ?? null,
       shared_with: shared_with ?? [],
+      template_id: template?.id ?? null,
     })
     .select("*")
     .single();
-  if (error) return void res.status(500).json({ detail: error.message });
-  res.status(201).json({ ...data, documents: [] });
+  if (projectError)
+    return void res.status(500).json({ detail: projectError.message });
+
+  // If a template applies, batch-create subfolders. Two passes because
+  // child folders need the UUIDs of their parents (which we don't know until
+  // Batch A's `.select()` returns). On any failure: delete the project
+  // (CASCADE removes any folders already created). Atomic from the user's
+  // perspective even though it isn't truly transactional Postgres-side.
+  let subfolders: Array<{ id: string; name: string; parent_folder_id: string | null }> = [];
+  if (template) {
+    const topLevel = template.subfolders
+      .map((sf, idx) => ({ ...sf, idx }))
+      .filter((sf) => sf.parent === undefined);
+    const nested = template.subfolders
+      .map((sf, idx) => ({ ...sf, idx }))
+      .filter((sf) => sf.parent !== undefined);
+
+    const { data: batchA, error: batchAError } = await db
+      .from("project_subfolders")
+      .insert(
+        topLevel.map((sf) => ({
+          project_id: project.id,
+          user_id: userId,
+          name: sf.name,
+          parent_folder_id: null,
+        })),
+      )
+      .select("id, name");
+
+    if (batchAError || !batchA) {
+      await db.from("projects").delete().eq("id", project.id);
+      return void res
+        .status(500)
+        .json({ detail: batchAError?.message ?? "subfolder batch A failed" });
+    }
+
+    // Map original template-array-index → newly-created folder UUID by
+    // matching on name (names are unique within a template; the registry
+    // enforces this implicitly by listing each name once).
+    const idxToUuid = new Map<number, string>();
+    for (const sf of topLevel) {
+      const created = batchA.find((row) => row.name === sf.name);
+      if (created) idxToUuid.set(sf.idx, created.id);
+    }
+
+    if (nested.length > 0) {
+      const { data: batchB, error: batchBError } = await db
+        .from("project_subfolders")
+        .insert(
+          nested.map((sf) => ({
+            project_id: project.id,
+            user_id: userId,
+            name: sf.name,
+            parent_folder_id: idxToUuid.get(sf.parent as number) ?? null,
+          })),
+        )
+        .select("id, name, parent_folder_id");
+
+      if (batchBError) {
+        await db.from("projects").delete().eq("id", project.id);
+        return void res
+          .status(500)
+          .json({ detail: batchBError.message });
+      }
+
+      subfolders = [
+        ...batchA.map((row) => ({ ...row, parent_folder_id: null })),
+        ...(batchB ?? []),
+      ];
+    } else {
+      subfolders = batchA.map((row) => ({ ...row, parent_folder_id: null }));
+    }
+  }
+
+  res
+    .status(201)
+    .json({ ...project, documents: [], subfolders });
 });
 
 // GET /projects/:projectId

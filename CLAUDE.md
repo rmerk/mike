@@ -65,8 +65,13 @@ There is **no test runner** in either package — don't waste cycles looking for
 ## Database
 
 - Fresh DB: paste `backend/schema.sql` into the Supabase SQL editor.
-- Existing DB: apply files in `backend/migrations/`; never re-run `schema.sql` against production data.
+- Existing DB: apply files in `backend/migrations/` in numeric order (`0001_…`, `0002_…`); never re-run `schema.sql` against production data. Always fold the same change into `schema.sql` so fresh installs stay current.
 - Tables worth knowing: `user_profiles`, `user_api_keys`, `projects`, `project_subfolders`, `documents`, `document_versions`, `chats`, `chat_messages`, `workflows`, `tabular_reviews`, `tabular_cells`. Document bytes live in R2; Postgres only stores metadata + structured chat content.
+- The `projects.template_id` column references the in-process `BUILTIN_PROJECT_TEMPLATES` registry (`backend/src/lib/builtinProjectTemplates.ts`). No FK — registry is code, not data.
+
+### Supabase branching (development DB sandbox)
+
+Supabase Pro and above can spin up a development branch that mirrors prod schema and migrations (`mcp__supabase__create_branch` → `apply_migration` → `merge_branch` → `delete_branch`). **The current org (`rmmain-2176's projects`) is on the free plan, where branching returns `PaymentRequiredException`.** Until the plan is upgraded, schema migrations apply directly to prod (`qkfcrsrtualqdmqqexpf`) via `mcp__supabase__apply_migration`. Prefer reversible changes (additive columns with `if not exists`, nullable defaults) so a bad migration can be rolled back without data loss.
 
 ## Env & secrets
 

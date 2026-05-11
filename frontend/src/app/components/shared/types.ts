@@ -17,10 +17,14 @@ export interface MikeProject {
   name: string;
   cm_number: string | null;
   shared_with: string[];
+  /** Built-in template id (e.g., 'med-mal-case') or null for blank projects. */
+  template_id?: string | null;
   created_at: string;
   updated_at: string;
   documents?: MikeDocument[];
   folders?: MikeFolder[];
+  /** Subfolders returned from POST /projects when a template was applied. */
+  subfolders?: Array<{ id: string; name: string; parent_folder_id: string | null }>;
   document_count?: number;
   chat_count?: number;
   review_count?: number;

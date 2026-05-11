@@ -29,6 +29,19 @@ interface Props {
     projectDocs?: MikeDocument[];
     projectName?: string;
     projectCmNumber?: string | null;
+    /**
+     * Pre-populated title. Used by the project-page "Recommended tabular
+     * reviews" strip (each schema button opens this modal with the schema's
+     * name as the title and its columns_config as the preset).
+     */
+    initialTitle?: string;
+    /**
+     * Pre-populated columns_config. When set, the workflow dropdown remains
+     * usable but defaults to "(preset)"; clearing the workflow selection
+     * does NOT clear the preset — the user must explicitly pick a different
+     * workflow to override. Submitted with the form if no workflow override.
+     */
+    initialColumnsConfig?: MikeWorkflow["columns_config"];
 }
 
 export function AddNewTRModal({
@@ -39,6 +52,8 @@ export function AddNewTRModal({
     projectDocs: fixedProjectDocs,
     projectName,
     projectCmNumber,
+    initialTitle,
+    initialColumnsConfig,
 }: Props) {
     const isProjectMode = fixedProjectDocs !== undefined;
     const [title, setTitle] = useState("");
@@ -73,6 +88,11 @@ export function AddNewTRModal({
 
     useEffect(() => {
         if (!open) return;
+
+        // Pre-populate from props when opening (e.g., from project-page
+        // "Recommended tabular reviews" strip). Only seed on transition from
+        // closed→open so user edits aren't clobbered on re-render.
+        if (initialTitle) setTitle(initialTitle);
 
         setLoadingWorkflows(true);
         const builtinTabular = BUILT_IN_WORKFLOWS.filter(
@@ -136,11 +156,17 @@ export function AddNewTRModal({
         const selectedWorkflow = workflows.find(
             (w) => w.id === selectedWorkflowId,
         );
+        // Workflow selection overrides initialColumnsConfig; if neither, fall
+        // back to undefined (free-form review with no preset columns).
+        const columnsConfig =
+            selectedWorkflow?.columns_config ??
+            initialColumnsConfig ??
+            undefined;
         onAdd(
             title.trim(),
             underProject ? selectedProjectId : undefined,
             selectedDocIds.size > 0 ? [...selectedDocIds] : undefined,
-            selectedWorkflow?.columns_config ?? undefined,
+            columnsConfig,
         );
         handleClose();
     }

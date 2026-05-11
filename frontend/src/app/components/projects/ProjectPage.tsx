@@ -46,6 +46,7 @@ import {
     type MikeDocumentVersion,
 } from "@/app/lib/mikeApi";
 import type {
+    ColumnConfig,
     MikeDocument,
     MikeFolder,
     MikeProject,
@@ -66,6 +67,11 @@ import { useAuth } from "@/contexts/AuthContext";
 import { UploadNewVersionModal } from "@/app/components/shared/UploadNewVersionModal";
 import { DocViewModal } from "@/app/components/shared/DocViewModal";
 import { AddNewTRModal } from "@/app/components/tabular/AddNewTRModal";
+import {
+    BUILTIN_TABULAR_SCHEMAS,
+    getBuiltinTabularSchema,
+} from "@/app/components/tabular/builtinTabularSchemas";
+import { getFrontendProjectTemplate } from "@/app/components/projects/builtinProjectTemplates";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 
 interface Props {
@@ -327,6 +333,12 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
     const [creatingChat, setCreatingChat] = useState(false);
     const [creatingReview, setCreatingReview] = useState(false);
     const [newTRModalOpen, setNewTRModalOpen] = useState(false);
+    // Pre-populated review state for recommended-reviews strip (template projects).
+    // When non-null, AddNewTRModal opens with this title and columns_config seeded.
+    const [recommendedReviewSeed, setRecommendedReviewSeed] = useState<{
+        title: string;
+        columnsConfig: ColumnConfig[];
+    } | null>(null);
 
     // Per-tab selection
     const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
@@ -1752,6 +1764,70 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                 {/* Tab: Reviews */}
                 {tab === "reviews" && (
                     <>
+                        {/* Recommended tabular reviews strip — only when project uses a template. */}
+                        {(() => {
+                            const template = getFrontendProjectTemplate(
+                                project?.template_id,
+                            );
+                            if (!template) return null;
+                            const docsReady =
+                                project?.documents?.filter(
+                                    (d) => d.status === "ready",
+                                ) ?? [];
+                            return (
+                                <div className="border-b border-gray-200 px-4 py-3">
+                                    <p className="text-xs font-medium text-gray-500 mb-2">
+                                        Recommended for{" "}
+                                        <span className="text-gray-700">
+                                            {template.name}
+                                        </span>
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {template.recommendedSchemaIds.map(
+                                            (schemaId) => {
+                                                const schema =
+                                                    getBuiltinTabularSchema(
+                                                        schemaId,
+                                                    );
+                                                if (!schema) return null;
+                                                return (
+                                                    <button
+                                                        key={schema.id}
+                                                        type="button"
+                                                        disabled={
+                                                            creatingReview ||
+                                                            docsReady.length ===
+                                                                0
+                                                        }
+                                                        title={
+                                                            docsReady.length ===
+                                                            0
+                                                                ? "Upload a document first"
+                                                                : schema.description
+                                                        }
+                                                        onClick={() => {
+                                                            setRecommendedReviewSeed(
+                                                                {
+                                                                    title: schema.title,
+                                                                    columnsConfig:
+                                                                        schema.columns_config,
+                                                                },
+                                                            );
+                                                            setNewTRModalOpen(
+                                                                true,
+                                                            );
+                                                        }}
+                                                        className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-40 transition-colors"
+                                                    >
+                                                        + {schema.title}
+                                                    </button>
+                                                );
+                                            },
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })()}
                         <div className="flex items-center h-8 pr-8 border-b border-gray-200 text-xs text-gray-500 font-medium select-none">
                             <div className={`sticky left-0 z-[60] ${CHECK_W} relative bg-white flex items-center justify-center self-stretch before:absolute before:inset-x-0 before:bottom-0 before:h-px before:bg-white`}>
                                 <input
@@ -1862,11 +1938,16 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
 
             <AddNewTRModal
                 open={newTRModalOpen}
-                onClose={() => setNewTRModalOpen(false)}
+                onClose={() => {
+                    setNewTRModalOpen(false);
+                    setRecommendedReviewSeed(null);
+                }}
                 onAdd={handleCreateReview}
                 projectDocs={project?.documents?.filter((d) => d.status === "ready")}
                 projectName={project?.name}
                 projectCmNumber={project?.cm_number}
+                initialTitle={recommendedReviewSeed?.title}
+                initialColumnsConfig={recommendedReviewSeed?.columnsConfig}
             />
 
             <OwnerOnlyModal

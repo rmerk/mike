@@ -85,11 +85,12 @@ export async function createProject(
     name: string,
     cm_number?: string,
     shared_with?: string[],
+    template_id?: string,
 ): Promise<MikeProject> {
     return apiRequest<MikeProject>("/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, cm_number, shared_with }),
+        body: JSON.stringify({ name, cm_number, shared_with, template_id }),
     });
 }
 

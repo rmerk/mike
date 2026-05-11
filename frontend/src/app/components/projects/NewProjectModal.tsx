@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { X, Users, Upload } from "lucide-react";
+import { Check, ChevronDown, X, Users, Upload } from "lucide-react";
 import {
     addDocumentToProject,
     createProject,
@@ -11,6 +11,7 @@ import { useDirectoryData } from "../shared/useDirectoryData";
 import { FileDirectory } from "../shared/FileDirectory";
 import { EmailPillInput } from "../shared/EmailPillInput";
 import type { MikeProject } from "../shared/types";
+import { BUILTIN_PROJECT_TEMPLATES } from "./builtinProjectTemplates";
 
 interface Props {
     open: boolean;
@@ -21,6 +22,8 @@ interface Props {
 export function NewProjectModal({ open, onClose, onCreated }: Props) {
     const [name, setName] = useState("");
     const [cmNumber, setCmNumber] = useState("");
+    const [templateId, setTemplateId] = useState<string | null>(null);
+    const [templateDropdownOpen, setTemplateDropdownOpen] = useState(false);
     const [sharedEmails, setSharedEmails] = useState<string[]>([]);
     const [showMembers, setShowMembers] = useState(false);
     const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
@@ -28,6 +31,7 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const selectedTemplate = BUILTIN_PROJECT_TEMPLATES.find((t) => t.id === templateId);
 
     const { loading: dirLoading, standaloneDocuments, projects: dirProjects } = useDirectoryData(open);
 
@@ -50,6 +54,7 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                 name.trim(),
                 cmNumber.trim() || undefined,
                 sharedEmails,
+                templateId ?? undefined,
             );
             await Promise.all([
                 ...[...selectedDocIds].map((id) => addDocumentToProject(project.id, id).catch(() => {})),
@@ -68,6 +73,8 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
     function resetForm() {
         setName("");
         setCmNumber("");
+        setTemplateId(null);
+        setTemplateDropdownOpen(false);
         setSharedEmails([]);
         setShowMembers(false);
         setSelectedDocIds(new Set());
@@ -118,6 +125,95 @@ export function NewProjectModal({ open, onClose, onCreated }: Props) {
                             placeholder="Add a CM number..."
                             className="mt-1.5 w-full text-sm text-gray-500 placeholder-gray-300 focus:outline-none bg-transparent"
                         />
+
+                        {/* Template picker */}
+                        <div className="mt-4 relative">
+                            <label className="block text-xs font-medium text-gray-700 mb-1.5">
+                                Template
+                            </label>
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    setTemplateDropdownOpen((v) => !v)
+                                }
+                                className="flex w-full items-center justify-between rounded-lg border border-gray-200 px-3 py-2 text-sm text-left hover:bg-gray-50 transition-colors"
+                            >
+                                <span
+                                    className={
+                                        selectedTemplate
+                                            ? "text-gray-800"
+                                            : "text-gray-400"
+                                    }
+                                >
+                                    {selectedTemplate?.name ??
+                                        "None (blank project)"}
+                                </span>
+                                <ChevronDown
+                                    className={`h-4 w-4 text-gray-400 transition-transform ${
+                                        templateDropdownOpen
+                                            ? "rotate-180"
+                                            : ""
+                                    }`}
+                                />
+                            </button>
+                            {templateDropdownOpen && (
+                                <div className="absolute z-10 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg max-h-64 overflow-y-auto">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setTemplateId(null);
+                                            setTemplateDropdownOpen(false);
+                                        }}
+                                        className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-gray-50 transition-colors"
+                                    >
+                                        <div className="flex flex-col items-start">
+                                            <span className="text-gray-800">
+                                                None (blank project)
+                                            </span>
+                                            <span className="text-xs text-gray-400">
+                                                Empty project, no preset folders or
+                                                recommended reviews
+                                            </span>
+                                        </div>
+                                        {templateId === null && (
+                                            <Check className="h-4 w-4 text-gray-600 shrink-0 ml-2" />
+                                        )}
+                                    </button>
+                                    {BUILTIN_PROJECT_TEMPLATES.map((tpl) => (
+                                        <button
+                                            key={tpl.id}
+                                            type="button"
+                                            onClick={() => {
+                                                setTemplateId(tpl.id);
+                                                setTemplateDropdownOpen(false);
+                                            }}
+                                            className={`flex w-full items-start justify-between gap-2 px-3 py-2 text-sm hover:bg-gray-50 transition-colors ${
+                                                templateId === tpl.id
+                                                    ? "bg-gray-50"
+                                                    : ""
+                                            }`}
+                                        >
+                                            <div className="flex flex-col items-start min-w-0">
+                                                <span className="text-gray-800">
+                                                    {tpl.name}
+                                                </span>
+                                                <span className="text-xs text-gray-500 text-left">
+                                                    {tpl.description}
+                                                </span>
+                                            </div>
+                                            {templateId === tpl.id && (
+                                                <Check className="h-4 w-4 text-gray-600 shrink-0 ml-2 mt-0.5" />
+                                            )}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                            {selectedTemplate && !templateDropdownOpen && (
+                                <p className="mt-1.5 text-xs text-gray-500">
+                                    {selectedTemplate.description}
+                                </p>
+                            )}
+                        </div>
 
                         {/* Attribute pills */}
                         <div className="mt-4 flex flex-wrap items-center gap-2">

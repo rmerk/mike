@@ -87,9 +87,12 @@ create table if not exists public.projects (
   cm_number text,
   visibility text not null default 'private',
   shared_with jsonb not null default '[]'::jsonb,
+  template_id text null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+comment on column public.projects.template_id is
+  'Project template id from BUILTIN_PROJECT_TEMPLATES registry (e.g., med-mal-case). Null for blank projects.';
 
 create index if not exists idx_projects_user
   on public.projects(user_id);
