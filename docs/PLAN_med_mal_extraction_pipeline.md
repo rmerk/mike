@@ -128,13 +128,17 @@ create table document_events (
   event_date date,
   event_time time,
   event_date_text text,                 -- raw, when date is ambiguous
-  provider text,
+  provider text,                        -- verbatim name; canonical resolution is post-extraction
+  provider_role text,                   -- attending|fellow|resident|aprn|crna|rn|perfusionist|pa (Plutshack role-specific SOC)
+  episode_of_care text,                 -- index_op|reop|readmission|clinic|ed_visit|... (chronology clustering)
   encounter_type text,                  -- admission|ed|clinic|lab|imaging|op|nursing|note
+  privacy_class text not null default 'standard',  -- standard|mental_health_144_293|peer_review_145_64|substance_abuse_42_cfr_part_2
+  key_date_role text,                   -- null|negligent_act_candidate|last_treatment_candidate|injury_discovery_candidate|discovery_commenced_2604a_candidate (feeds Phase 4 key_dates jsonb)
   dx_codes text[],
-  medications jsonb,                    -- [{name, dose, route, frequency}]
+  medications jsonb,                    -- [{name, dose, route, frequency, ordered_by, administered_by, ordered_at, administered_at, indication, allergy_conflict_flag, weight_based_dose_check_passed}] (Mulder rule per Reinhardt)
   vitals jsonb,                         -- {bp, hr, rr, spo2, temp, ...}
   procedures text[],
-  narrative text,                       -- short LLM summary, ≤500 chars
+  narrative text,                       -- short LLM summary, ≤500 chars (redacted-by-default when privacy_class=mental_health_144_293; never populated when privacy_class=peer_review_145_64)
   source_page int not null,
   source_bbox jsonb,                    -- {x, y, w, h} in PDF user-space units
   extraction_run_id uuid not null,
@@ -142,14 +146,18 @@ create table document_events (
 );
 create index on document_events (document_id, event_date);
 create index on document_events (document_id, encounter_type);
+create index on document_events (document_id, privacy_class);
+create index on document_events (document_id, key_date_role) where key_date_role is not null;
 
 create table document_red_flags (
   id uuid primary key default gen_random_uuid(),
   document_id uuid not null references documents(id) on delete cascade,
-  rule_id text not null,                -- 'delayed_dx', 'med_error', ...
+  rule_id text not null,                -- 'delayed_dx', 'med_error', 'temporal_anchor_causation', ...
+  supports_element text not null,       -- 'duty'|'breach'|'causation'|'damages' (Plutshack/Smith four-cut tagging)
   severity text not null,               -- 'low'|'medium'|'high'
   summary text not null,
   supporting_event_ids uuid[] not null,
+  awaits_expert_affidavit boolean not null default true,  -- flipped to false when builtin-expert-opinions-145682 row marks this flag as addressed (§ 145.682(4)(a))
   created_at timestamptz default now()
 );
 
@@ -168,6 +176,10 @@ create table document_extractions (
 
 No backfill needed (new tables). RLS policies should match the pattern used by
 `documents` (filtered by `user_id` join through the parent document).
+**Additional RLS clause for `document_events`**: default queries filter
+`privacy_class != 'peer_review_145_64'`. Rows with that class are written by
+the extractor's hard-refuse path (see §Defenses) but never surfaced through
+the default reader; explicit project-level toggle required.
 
 ## Citation enforcement
 
@@ -186,22 +198,30 @@ display-side citations in chat responses — extend rather than replace.
 
 ## Red-flag library (v1)
 
-Five rules, each a deterministic typescript filter over `document_events`. They
+Six rules, each a deterministic typescript filter over `document_events`. They
 *surface candidates for human review*; they do not auto-assert malpractice.
 Rules live in `backend/src/lib/extraction/redFlags.ts`, one exported function
-per rule, returning `{rule_id, severity, summary, supporting_event_ids[]}`.
+per rule, returning `{rule_id, supports_element, severity, summary, supporting_event_ids[]}`.
+The `supports_element` value tags each rule against the *Plutshack/Smith*
+4-cut framework (duty / breach / causation / damages) so the project page's
+red-flag list can be filtered by which prima facie element a flag bolsters.
 
-- `delayed_dx` — symptom-cluster events ≥ N days before a matching dx code.
-- `med_error` — dose outside the reference range for a given diagnosis.
-- `retained_foreign_object` — op note + post-op imaging mentioning hardware
-  not accounted for in the op-note count.
-- `failure_to_monitor` — vitals gap > X hours during a high-acuity encounter
-  (ICU, post-op, ED).
-- `informed_consent_gap` — procedure event with no consent event in the 48h
-  prior.
+| rule_id | supports_element | Trigger | Primary authority |
+|---|---|---|---|
+| `delayed_dx` | breach | Symptom-cluster events ≥ N days before a matching dx code. | *Plutshack/Smith* (departure from SOC) |
+| `med_error` | breach | Dose outside the reference range for a given diagnosis; package-insert deviation. | *Reinhardt v. Colton* (Mulder rule) |
+| `retained_foreign_object` | breach | Op note + post-op imaging mentioning hardware not accounted for in the op-note count. | *Plutshack/Smith* + common-knowledge exception |
+| `failure_to_monitor` | breach | Vitals gap > X hours during a high-acuity encounter (ICU, post-op, ED). | *Plutshack/Smith* |
+| `informed_consent_gap` | duty | Procedure event with no consent event in the 48h prior. | *Cornfeldt v. Tongen* (informed-consent duty) |
+| `temporal_anchor_causation` | causation | Adverse outcome (narrative matches: arrest, exsanguination, stroke, death, return-to-OR, unexpected ICU transfer) within ≤ N hours of a `delayed_dx` / `med_error` / `failure_to_monitor` finding. Severity scales with temporal proximity. | *Plutshack/Smith* causation skeleton; *Flom v. Flom* substantial-factor |
 
 V1 deliberately ships narrow rather than comprehensive — expand once the gold
-set (see Verification) tells us where the model's recall is good enough.
+set (see Verification) tells us where the model's recall is good enough. The
+`temporal_anchor_causation` rule does NOT prove causation (Plutshack/Smith
+require expert testimony for causation); it surfaces tight temporal anchors
+that sharpen the retained expert's reasoning. Loss-of-chance analysis
+(*Dickhoff v. Green*) is reserved for the `builtin-causation-chain` tabular
+review.
 
 ## Reuse map
 
@@ -238,6 +258,45 @@ Symbols already in the repo that this plan uses (do not reinvent):
   Tool calls must be triggered only by the orchestrator, never by content
   parsed from the document.
 - Adversarial regression suite (see Verification).
+
+### MN-specific extraction policies
+
+- **§ 145.64 peer-review hard-refuse.** Before any per-page extraction call,
+  scan page text (case-insensitive) for peer-review markers: `peer review`,
+  `peer-review committee`, `QI committee`, `quality improvement review`,
+  `root cause analysis`, `RCA report`, `morbidity and mortality conference`,
+  `M&M conference`, `sentinel event review`. If any page matches, **the
+  entire document extraction halts immediately**. The extractor emits a
+  single `document_red_flags` row with `rule_id='peer_review_detected'`,
+  `supports_element='breach'`, `severity='high'`, summary naming the
+  matching page numbers — and writes zero `document_events` rows. Minn. Stat.
+  § 145.64 makes peer-review records non-discoverable; extracting their
+  contents into the event log creates discoverable derivative material and is
+  malpractice on the attorney's part. **This is the strictest policy in the
+  codebase — refuse, do not redact.**
+
+- **§ 144.293 mental-health redaction-by-default.** When the document-class
+  triage marks a page or document as a mental-health record (research § 5.2
+  row 3), the extractor sets `privacy_class='mental_health_144_293'` and
+  emits a *redacted* event log: dates and `encounter_type` preserved, but
+  `narrative`, `dx_codes`, and `medications` left null. Full extraction is
+  gated on a project-level toggle that the user only flips after confirming
+  the heightened mental-health authorization required by § 144.293 is on
+  file. Default is redact.
+
+- **Rule 408 settlement-communications caveat.** Settlement correspondence
+  flagged in document-class triage (research § 5.2 row 15 attorney
+  correspondence with settlement context) is extracted normally — settlement
+  comms are discoverable — but every resulting `document_events.narrative`
+  is prefixed with `[Rule 408 — inadmissible to prove liability]`. The
+  caveat survives downstream into chat surfaces and the timeline UI so the
+  inadmissibility is impossible to miss when assembling exhibits.
+
+- **Rule 26(b)(3) work-product opt-out.** Attorney-correspondence and
+  consulting-expert notes flagged with `privileged:work_product_26b3`
+  (research § 5.2 rows 12, 15) are NOT extracted by default. Project-level
+  opt-in only, with a UI confirmation that explicitly names the
+  work-product privilege being waived for indexing purposes.
 
 ## Verification
 
@@ -299,6 +358,31 @@ End-to-end:
 - **Automated demand-letter generation.** Lane 1 / case-law territory; partner
   for content (CourtListener is the open option) rather than self-host
   Westlaw.
+- **Causation-chain reasoning (`builtin-causation-chain` tabular schema
+  columns: mechanism_of_harm, but_for_met, substantial_factor_met,
+  loss_of_chance_applicable).** Deliberately human-in-the-loop. *Plutshack
+  v. Univ. of Minn. Hosps.*, 316 N.W.2d 1, 5 (Minn. 1982) and *Smith v.
+  Knowles*, 281 N.W.2d 653, 655 (Minn. 1979) require expert testimony for
+  causation unless within common knowledge; deterministic LLM extraction
+  cannot substitute. Loss-of-chance under *Dickhoff v. Green*, 836 N.W.2d
+  321 (Minn. 2013), is fact-intensive and depends on the plaintiff retaining
+  the preponderance burden — also human-in-the-loop. The
+  `temporal_anchor_causation` red-flag rule surfaces candidate anchors but
+  does not assert causation. *Revisit when:* never — this is permanent
+  architectural separation.
+- **Provider-defendant entity resolution (`builtin-provider-defendant-map`
+  schema columns: held_out_as_hospital_provider, patient_reliance_facts,
+  named_as_defendant).** The event log captures `provider` name verbatim
+  and `provider_role` from the chart; canonical-entity resolution and
+  Popovich apparent-authority analysis (*Popovich v. Allina Health Sys.*,
+  946 N.W.2d 885 (Minn. 2020)) are post-extraction work. Why: the two
+  Popovich factors (hospital held-out as the provider; patient relied on
+  hospital rather than specific physician) are fact-intensive and depend on
+  outside-the-record evidence — advertising, patient testimony, intake
+  forms. *Revisit when:* a record-only signal correlates strongly enough
+  with held-out behavior to be worth automating (probably never — the
+  reliance prong almost certainly requires deposition testimony per
+  *Rock v. Abdullah* (Minn. Ct. App. 2022) limits).
 
 ## Estimated effort
 
@@ -309,3 +393,63 @@ End-to-end:
 
 Total: ~2 weeks of focused work for a v1 that's defensible enough to put in
 front of a paying attorney.
+
+---
+
+## Plan deltas — MN-law research alignment
+
+Apply in a follow-up turn. Line refs are against this file as of the templates-plan-revisions commit (1247921, 2026-05-11). All deltas are sourced from `docs/RESEARCH_mn_med_mal_law.md` and the validated `docs/PLAN_med_mal_templates.md`.
+
+**Two corrections to internalize first** (mirroring the research format). Both are already correct in this plan as written, but verify before edits land:
+- § 145.682 subd. 4's 180-day clock runs from "commencement of discovery under Rule 26.04(a)," not summons service. This plan doesn't claim otherwise; new red-flag rules that depend on the 145.682(4) deadline (none in v1) must reference Rule 26.04(a).
+- The MN prima facie negligence test is the 3-element Plutshack/Smith formulation (standard of care, departure, causation). Damages is the fourth element of the cause of action but not of the negligence test. The new `supports_element` tagging across tabular schemas keeps the four-cut categorization for extraction, which is correct.
+
+**Architectural tension flagged for Phase 3 integration:** the event log currently models clinical chronology only (`event_date`, `provider`, `encounter_type`, `dx_codes`, `medications`, `vitals`, `procedures`, `narrative`). The validated templates plan adds 10 tabular review schemas covering bills (§ 548.251 split), transfusions, MAR (Mulder rule), vitals/labs trends, imaging index, red flags, provider/defendant mapping, causation chain, and § 145.682 expert opinions. Most of these don't map cleanly to event-log columns. Phase 3 integration ("populate from event log") must decide: (a) expand the event log to cover every schema column (heavier extraction), or (b) keep per-schema extractor functions that read the PDF directly. Recommend (b) — the event log stays narrow and authoritative; each tabular schema has its own extractor that may *consult* the event log for date-anchoring but extracts schema-specific data independently. This is the cleanest separation of concerns.
+
+1. **`document_events` schema additions (line 132 region)**: add three columns to support Plutshack role-specific standard-of-care and the templates `episode_of_care` clustering: `provider_role text` (attending, fellow, resident, APRN, CRNA, RN, perfusionist, PA — *Plutshack* requires the expert to be qualified to opine on *that* role's standard), `episode_of_care text` (index op, re-op, readmission, clinic visit, etc. — feeds the templates `builtin-med-chronology` clustering at chronology line 75 of the templates plan), and `key_date_role text` (nullable enum: `negligent_act_candidate`, `last_treatment_candidate`, `injury_discovery_candidate`, `discovery_commenced_2604a_candidate` — Phase 4's `key_dates jsonb` widget auto-suggests from this).
+
+2. **`document_events.privacy_class` (NEW column at line 132 region)**: enum `standard | mental_health_144_293 | peer_review_145_64 | substance_abuse_42_cfr_part_2`. The extractor sets this per-page based on document-class triage (research § 5.2 rows 3, 6, 7). Combined with the hard-refuse rule below (delta 8), this is how MN heightened-consent and peer-review-privilege regimes are honored at the data layer. RLS policies in line 169–170 should add a clause filtering `peer_review_145_64` rows from default queries (must be explicitly requested).
+
+3. **`document_events.medications jsonb` shape (line 134)**: extend per-item shape from `{name, dose, route, frequency}` to `{name, dose, route, frequency, ordered_by, administered_by, ordered_at, administered_at, indication, allergy_conflict_flag, weight_based_dose_check_passed}`. The two flag fields feed the **Mulder rule** under *Reinhardt v. Colton*, 337 N.W.2d 88 (Minn. 1983) — deviation from package-insert dosing is prima facie evidence of negligence when accompanied by competent medical testimony. `ordered_at` and `administered_at` enable the templates `order_to_admin_delta_minutes` derived column for the MAR schema.
+
+4. **`document_red_flags.supports_element` (NEW column at line 146 region)**: enum `duty | breach | causation | damages`. Required, not null. Mirrors `builtin-med-red-flags-scan.supports_element` from the templates plan. Each red-flag rule (line 187–204) emits with the element it supports tagged. Without this column the rule library remains breach-only by accident (see delta 7).
+
+5. **`document_red_flags.awaits_expert_affidavit boolean default true` (NEW column at line 146 region)**: closes the loop with § 145.682(4)(a) affidavit content checklist (substance of facts, opinions, grounds). When the corresponding `builtin-expert-opinions-145682` tabular review row marks the affidavit as addressing this flag, an explicit reconciliation pass flips this to `false`. Until then, the project page's red-flag list can highlight "N flags awaiting expert affidavit" — operationally critical given subd. 6's mandatory-dismissal exposure.
+
+6. **Red-flag library rebalance (lines 187–204)**: tag each of the 5 existing rules with its `supports_element`. As-written: `delayed_dx` → breach (arguably causation when delay caused harm), `med_error` → breach, `retained_foreign_object` → breach, `failure_to_monitor` → breach, `informed_consent_gap` → duty (informed-consent duty under *Cornfeldt v. Tongen*, 262 N.W.2d 684 (Minn. 1977)). **All five are breach- or duty-anchored — no causation rule.** Add one causation-anchoring rule for v1: `temporal_anchor_causation` — a documented adverse outcome (event with `narrative` matching outcome keywords: arrest, exsanguination, stroke, death, return-to-OR) within ≤ N hours of a `delayed_dx`/`med_error`/`failure_to_monitor` finding. Severity scales with the temporal proximity. This is the *Plutshack/Smith* causation skeleton in deterministic form; expert testimony still required for trial, but the temporal anchor sharpens the expert's reasoning.
+
+7. **§ 145.64 peer-review hard-refuse (extend §Defenses, lines 229–240)**: add a pre-extraction triage step that scans page text for peer-review markers (case-insensitive: `peer review`, `peer-review committee`, `QI committee`, `quality improvement`, `root cause analysis`, `RCA report`, `morbidity and mortality`, `M&M conference`, `sentinel event review`). If detected on any page, **the entire document extraction halts**; the extractor emits a `document_red_flags` row with `rule_id='peer_review_detected'`, severity=`high`, and the supporting page numbers. **Do not extract any event-log rows from such documents.** § 145.64 makes these documents non-discoverable; extracting their contents into the event log creates discoverable derivative material and is malpractice on the attorney's part. Document this as the strictest extraction policy in the codebase.
+
+8. **§ 144.293 mental-health policy (extend §Defenses)**: when `privacy_class = mental_health_144_293`, the extractor produces a *redacted* event log (narrative omitted, specific diagnoses suppressed, only encounter dates + general encounter type preserved). The full content is only extracted on explicit project-level toggle once the case has signed the heightened mental-health authorization required by § 144.293. Mirror the templates plan's segregation of `mental-health-records/` as a top-level folder.
+
+9. **Explicit out-of-scope for v1 extraction (extend §Out of scope, line 284 region)**: name two surfaces that are *intentionally* not in extraction scope, with rationale:
+   - **Causation-chain reasoning** (`builtin-causation-chain` tabular schema columns: mechanism_of_harm, but_for_met, substantial_factor_met, loss_of_chance_applicable). Reserved for post-extraction tabular review or chat. Why: *Plutshack/Smith* require expert testimony for causation unless within common knowledge; deterministic LLM extraction cannot substitute. Loss-of-chance under *Dickhoff v. Green*, 836 N.W.2d 321 (Minn. 2013), is fact-intensive and requires the *plaintiff retains preponderance burden* framing. Human-in-the-loop.
+   - **Provider-defendant entity resolution** (`builtin-provider-defendant-map` schema columns: held_out_as_hospital_provider, patient_reliance_facts, named_as_defendant). The event log extracts `provider` name verbatim; canonical-entity resolution and Popovich apparent-authority analysis (*Popovich v. Allina Health Sys.*, 946 N.W.2d 885 (Minn. 2020)) are post-extraction. Why: the two Popovich factors (hospital held-out + patient reliance) are fact-intensive and depend on outside-the-record evidence (advertising, patient testimony).
+
+10. **§Defenses MN-specific additions (lines 229–240)**: append three policies:
+   - **§ 145.64 peer-review hard-refuse** (per delta 7).
+   - **§ 144.293 mental-health redaction-by-default** (per delta 8).
+   - **Rule 408 settlement-communications caveat**: events extracted from settlement correspondence (privacy_class is `standard` but document-class triage flagged it as settlement) get a `narrative` prefix `[Rule 408 — inadmissible to prove liability]`. The event is extracted because settlement comms are discoverable, but the inadmissibility caveat survives downstream into the chat/UI surface.
+   - **Rule 26(b)(3) work-product opt-out**: consulting-expert notes flagged in the document-class triage (research § 5.2 row 12, attorney-correspondence with `privileged:work_product_26b3`) are NOT extracted by default. Project-level opt-in only.
+
+---
+
+## Cited authority — quick reference
+
+**Statutes (Minn. unless noted):**
+- Minn. Stat. §§ 145.61–145.67 (peer-review / review-organization privilege; § 145.64 is the operative discovery shield) — delta 7
+- Minn. Stat. § 145.682 subd. 4(a), subd. 6 (affidavit content checklist + mandatory dismissal) — delta 5
+- Minn. Stat. § 144.293 (heightened consent for mental-health records) — delta 8
+- 42 C.F.R. Part 2 (federal substance-abuse-record confidentiality) — delta 2 enum
+- Minn. R. Civ. P. 26(b)(3) (work-product doctrine) — delta 10
+- Minn. R. Evid. 408 (settlement communications) — delta 10
+
+**Cases:**
+- *Plutshack v. Univ. of Minn. Hosps.*, 316 N.W.2d 1 (Minn. 1982) — 3-element prima facie test; role-specific standard of care — deltas 1, 6, 9
+- *Smith v. Knowles*, 281 N.W.2d 653 (Minn. 1979) — original articulation of the prima facie test — deltas 6, 9
+- *Reinhardt v. Colton*, 337 N.W.2d 88 (Minn. 1983) — Mulder rule on package-insert deviation — delta 3
+- *Cornfeldt v. Tongen*, 262 N.W.2d 684 (Minn. 1977) — informed-consent duty — delta 6
+- *Dickhoff v. Green*, 836 N.W.2d 321 (Minn. 2013) — loss-of-chance doctrine — delta 9
+- *Popovich v. Allina Health Sys.*, 946 N.W.2d 885 (Minn. 2020) — apparent-authority two-factor test — delta 9
+
+Verification of all cites: see `docs/RESEARCH_mn_med_mal_law.md` § "Verification log" (Revisor of Statutes + Justia primary-source spot-checks performed 2026-05-11).
