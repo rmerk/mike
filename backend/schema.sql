@@ -342,6 +342,9 @@ create index if not exists extraction_async_jobs_pending_idx
   on public.extraction_async_jobs (created_at)
   where status = 'pending';
 
+create index if not exists extraction_async_jobs_document_id_idx
+  on public.extraction_async_jobs (document_id);
+
 alter table public.extraction_async_jobs enable row level security;
 
 revoke all on table public.extraction_async_jobs from public;
