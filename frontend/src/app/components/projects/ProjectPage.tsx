@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -1399,6 +1400,16 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                 {/* Tab: Documents */}
                 {tab === "documents" && (
                     <div className="flex-1 flex flex-col min-h-0">
+                        {project?.template_id === "med-mal-case" && (
+                            <div className="flex justify-end px-2 py-1.5 border-b border-gray-100 bg-amber-50/40 shrink-0">
+                                <Link
+                                    href={`/projects/${projectId}/extraction`}
+                                    className="text-xs font-medium text-blue-800 hover:underline"
+                                >
+                                    Structured extraction viewer
+                                </Link>
+                            </div>
+                        )}
                         {/* Table header */}
                         <div className="flex items-center h-8 pr-8 border-b border-gray-200 text-xs text-gray-500 font-medium select-none shrink-0">
                             <div className={`sticky left-0 z-[60] ${CHECK_W} relative bg-white flex items-center justify-center self-stretch before:absolute before:inset-x-0 before:bottom-0 before:h-px before:bg-white`}>

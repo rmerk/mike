@@ -303,3 +303,40 @@ export interface TabularReviewDetailOut {
   cells: TabularCell[];
   documents: MikeDocument[];
 }
+
+// Med-mal structured extraction (Phase 2)
+
+export interface MedMalExtractionStatus {
+  run_id: string;
+  status: string;
+  pages_total: number | null;
+  pages_complete: number | null;
+  seq: number | null;
+  updated_at: string | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MedMalDocumentEvent {
+  id: string;
+  document_id: string;
+  extraction_run_id: string;
+  source_page: number;
+  source_bbox: { x: number; y: number; w: number; h: number };
+  narrative: string | null;
+  encounter_type: string | null;
+  event_date: string | null;
+  privacy_class?: string;
+}
+
+export interface MedMalRedFlag {
+  id: string;
+  document_id: string;
+  extraction_run_id: string;
+  rule_id: string;
+  supports_element: string;
+  severity: string;
+  summary: string;
+  supporting_event_ids: string[];
+}

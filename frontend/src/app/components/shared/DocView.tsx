@@ -12,6 +12,10 @@ import {
     highlightQuote,
     STANDARD_FONT_DATA_URL,
 } from "./highlightQuote";
+import {
+    clearBboxOverlays,
+    placePdfBboxOverlay,
+} from "./highlightBbox";
 
 interface Props {
     doc: { document_id: string; version_id?: string | null } | null;
@@ -20,6 +24,14 @@ interface Props {
     /** Back-compat single-quote API. Ignored if `quotes` is provided. */
     quote?: string;
     fallbackPage?: number;
+    /** PDF user-space bbox on `page` (1-based), after structured extraction. */
+    bboxHighlight?: {
+        page: number;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+    } | null;
     rounded?: boolean;
     bordered?: boolean;
 }
@@ -44,6 +56,7 @@ export function DocView({
     quotes,
     quote,
     fallbackPage,
+    bboxHighlight,
     rounded = true,
     bordered = true,
 }: Props) {
@@ -54,6 +67,7 @@ export function DocView({
     );
     const renderedPagesRef = useRef<RenderedPage[]>([]);
     const quoteListRef = useRef<QuoteEntry[]>([]);
+    const bboxHighlightRef = useRef<Props["bboxHighlight"]>(null);
     const zoomRef = useRef(1.0);
     const currentPageRef = useRef(1);
 
@@ -68,6 +82,12 @@ export function DocView({
     const quoteKey = quoteList
         .map((q) => `${q.page ?? ""}:${q.quote}`)
         .join("|");
+
+    const bboxKey = bboxHighlight
+        ? `${bboxHighlight.page}:${bboxHighlight.x}:${bboxHighlight.y}:${bboxHighlight.w}:${bboxHighlight.h}`
+        : "";
+
+    bboxHighlightRef.current = bboxHighlight ?? null;
 
     const [containerWidth, setContainerWidth] = useState(0);
     const [zoom, setZoom] = useState(1.0);
@@ -266,6 +286,20 @@ export function DocView({
                     canvas,
                     textDivs,
                 });
+            }
+
+            for (const p of renderedPagesRef.current) {
+                clearBboxOverlays(p.wrapper);
+            }
+            const bh = bboxHighlightRef.current;
+            if (
+                bh &&
+                bh.page >= 1 &&
+                bh.page <= doc.numPages &&
+                renderedPagesRef.current[bh.page - 1]
+            ) {
+                const entry = renderedPagesRef.current[bh.page - 1];
+                placePdfBboxOverlay(entry.wrapper, entry.viewport, bh);
             }
 
             // Apply highlights across all entries, then scroll to the first hit.
@@ -498,6 +532,15 @@ export function DocView({
         if (quoteList.length === 0) return;
         rehighlightQuotes(quoteList);
     }, [quoteKey, rehighlightQuotes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        if (!pdfDocRef.current) return;
+        void renderPDF(
+            pdfDocRef.current,
+            quoteListRef.current,
+            currentPageRef.current,
+        );
+    }, [bboxKey, renderPDF]);
 
     function handleZoomIn() {
         const next = Math.min(

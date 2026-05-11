@@ -16,6 +16,9 @@ import type {
     MikeWorkflow,
     TabularReview,
     TabularReviewDetailOut,
+    MedMalExtractionStatus,
+    MedMalDocumentEvent,
+    MedMalRedFlag,
 } from "@/app/components/shared/types";
 
 // Server-side shape before mapping
@@ -863,4 +866,36 @@ export async function deleteWorkflowShare(
     await apiRequest(`/workflows/${workflowId}/shares/${shareId}`, {
         method: "DELETE",
     });
+}
+
+// ---------------------------------------------------------------------------
+// Med-mal extraction
+// ---------------------------------------------------------------------------
+
+export async function runMedMalExtraction(
+    documentId: string,
+): Promise<{ run_id: string; status: string }> {
+    return apiRequest(`/extraction/${documentId}/run`, { method: "POST" });
+}
+
+export async function getMedMalExtractionStatus(
+    documentId: string,
+): Promise<MedMalExtractionStatus> {
+    return apiRequest(`/extraction/${documentId}/status`);
+}
+
+export async function listMedMalDocumentEvents(
+    documentId: string,
+    runId?: string,
+): Promise<{ run_id: string; events: MedMalDocumentEvent[] }> {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    return apiRequest(`/extraction/${documentId}/events${qs}`);
+}
+
+export async function listMedMalRedFlags(
+    documentId: string,
+    runId?: string,
+): Promise<{ run_id: string; red_flags: MedMalRedFlag[] }> {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    return apiRequest(`/extraction/${documentId}/red-flags${qs}`);
 }
