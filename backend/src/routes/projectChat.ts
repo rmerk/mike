@@ -9,6 +9,7 @@ import {
     extractAnnotations,
     runLLMStream,
     PROJECT_EXTRA_TOOLS,
+    MED_MAL_EXTRACTION_TOOLS,
     type ChatMessage,
 } from "../lib/chatTools";
 import { getUserApiKeys } from "../lib/userSettings";
@@ -49,6 +50,35 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     );
     if (!projectAccess.ok)
         return void res.status(404).json({ detail: "Project not found" });
+
+    const { data: projRow } = await db
+        .from("projects")
+        .select("template_id")
+        .eq("id", projectId)
+        .single();
+    const isMedMalTemplate = projRow?.template_id === "med-mal-case";
+
+    let extractionCompleteHint = "";
+    if (isMedMalTemplate) {
+        const { data: projDocs } = await db
+            .from("documents")
+            .select("id")
+            .eq("project_id", projectId);
+        const docIds = (projDocs ?? []).map((d) => d.id as string);
+        if (docIds.length > 0) {
+            const { data: doneRow } = await db
+                .from("document_extractions")
+                .select("id")
+                .eq("status", "complete")
+                .in("document_id", docIds)
+                .limit(1)
+                .maybeSingle();
+            if (doneRow) {
+                extractionCompleteHint =
+                    "\n\nSTRUCTURED EXTRACTION: At least one document in this project has a completed extraction run. Prefer read_event_log / find_events_in_range / read_pdf_page_region over bulk read_document for large medical-record PDFs when you only need timeline-anchored facts.";
+            }
+        }
+    }
 
     let chatId = chat_id ?? null;
     let chatTitle: string | null = null;
@@ -123,6 +153,7 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     // knows which docs the user is highlighting *now*, distinct from
     // the broader project doc list.
     let systemPromptExtra = PROJECT_SYSTEM_PROMPT_EXTRA;
+    if (extractionCompleteHint) systemPromptExtra += extractionCompleteHint;
     if (attached_documents?.length) {
         const slugByDocumentId = new Map<string, string>();
         for (const [slug, info] of Object.entries(docIndex)) {
@@ -164,7 +195,10 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
             userId,
             db,
             write,
-            extraTools: PROJECT_EXTRA_TOOLS,
+            extraTools: [
+                ...PROJECT_EXTRA_TOOLS,
+                ...(isMedMalTemplate ? MED_MAL_EXTRACTION_TOOLS : []),
+            ],
             workflowStore,
             model,
             apiKeys,

@@ -31,3 +31,5 @@ export async function completeText(params: {
     if (provider === "nvidia") return completeNvidiaText(params);
     return completeGeminiText(params);
 }
+
+export { completeClaudeMedMalExtractionPage } from "./claude";

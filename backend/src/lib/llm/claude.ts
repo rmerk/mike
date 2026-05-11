@@ -155,5 +155,42 @@ export async function completeClaudeText(params: {
     return text;
 }
 
+/** One-shot JSON extraction for a single PDF page (non-streaming; no thinking). */
+export async function completeClaudeMedMalExtractionPage(params: {
+    model: string;
+    systemPrompt: string;
+    userContent: string;
+    /** Base64-encoded PNG when the text layer is empty (scanned page path). */
+    visionPngBase64?: string;
+    maxTokens?: number;
+    apiKeys?: { claude?: string | null };
+}): Promise<string> {
+    const anthropic = client(params.apiKeys?.claude);
+    const content: Anthropic.ContentBlockParam[] = [
+        { type: "text", text: params.userContent },
+    ];
+    if (params.visionPngBase64) {
+        content.push({
+            type: "image",
+            source: {
+                type: "base64",
+                media_type: "image/png",
+                data: params.visionPngBase64,
+            },
+        });
+    }
+    const resp = await anthropic.messages.create({
+        model: params.model,
+        max_tokens: params.maxTokens ?? 8192,
+        system: params.systemPrompt,
+        messages: [{ role: "user", content }],
+    });
+    const text = resp.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+    return text;
+}
+
 // Helper re-export for callers wanting to hand normalized results back in.
 export type { NormalizedToolResult };

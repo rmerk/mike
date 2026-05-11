@@ -163,6 +163,16 @@ export function pdfStorageKey(
   return `documents/${userId}/${docId}/${stem}.pdf`;
 }
 
+/** Rasterized extraction page image; include run id so re-runs never read stale keys. */
+export function extractionPageRasterKey(
+  userId: string,
+  docId: string,
+  extractionRunId: string,
+  pageNum: number,
+): string {
+  return `documents/${userId}/${docId}/extraction-rasters/${extractionRunId}/page-${pageNum}.png`;
+}
+
 export function generatedDocKey(
   userId: string,
   docId: string,
