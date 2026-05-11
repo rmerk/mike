@@ -116,7 +116,11 @@ app.post("/single-documents", uploadLimiter);
 app.post("/single-documents/:documentId/versions", uploadLimiter);
 app.post("/projects/:projectId/documents", uploadLimiter);
 
-app.use("/extraction", extractionLimiter, extractionRouter);
+// Limiter applies only to the POST that spawns a run; GET status/events/red-flags
+// are polled by the extraction page every few seconds and would otherwise 429.
+app.post("/extraction/:documentId/run", extractionLimiter);
+
+app.use("/extraction", extractionRouter);
 
 app.use("/chat", chatRouter);
 app.use("/projects", projectsRouter);

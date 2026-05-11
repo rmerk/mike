@@ -304,18 +304,58 @@ export interface TabularReviewDetailOut {
   documents: MikeDocument[];
 }
 
-// Med-mal structured extraction (Phase 2)
+// Med-mal structured extraction
 
-export interface MedMalExtractionStatus {
-  run_id: string;
-  status: string;
-  pages_total: number | null;
-  pages_complete: number | null;
-  seq: number | null;
-  updated_at: string | null;
-  error: string | null;
-  started_at: string | null;
-  completed_at: string | null;
+// Mirrors the SQL check on document_extractions.status; making this a
+// discriminated union lets the UI exhaustively match on `status` and
+// caller code learns the payload shape per state.
+export type MedMalExtractionStatus =
+  | {
+      status: "pending" | "running";
+      run_id: string;
+      pages_total: number | null;
+      pages_complete: number | null;
+      seq: number | null;
+      updated_at: string | null;
+      started_at: string | null;
+      error: null;
+      completed_at: null;
+    }
+  | {
+      status: "complete";
+      run_id: string;
+      pages_total: number | null;
+      pages_complete: number | null;
+      seq: number | null;
+      updated_at: string | null;
+      started_at: string | null;
+      error: null;
+      completed_at: string | null;
+    }
+  | {
+      status: "failed";
+      run_id: string;
+      pages_total: number | null;
+      pages_complete: number | null;
+      seq: number | null;
+      updated_at: string | null;
+      started_at: string | null;
+      error: string | null;
+      completed_at: string | null;
+    };
+
+export function isTerminalExtractionStatus(
+  status: MedMalExtractionStatus["status"],
+): boolean {
+  return status === "complete" || status === "failed";
+}
+
+// PDF user space at scale 1, origin bottom-left.
+export interface MedMalSourceBbox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface MedMalDocumentEvent {
@@ -323,20 +363,27 @@ export interface MedMalDocumentEvent {
   document_id: string;
   extraction_run_id: string;
   source_page: number;
-  source_bbox: { x: number; y: number; w: number; h: number };
+  source_bbox: MedMalSourceBbox;
   narrative: string | null;
   encounter_type: string | null;
   event_date: string | null;
   privacy_class?: string;
 }
 
+export type MedMalRedFlagSeverity = "low" | "medium" | "high";
+export type MedMalRedFlagSupportsElement =
+  | "duty"
+  | "breach"
+  | "causation"
+  | "damages";
+
 export interface MedMalRedFlag {
   id: string;
   document_id: string;
   extraction_run_id: string;
   rule_id: string;
-  supports_element: string;
-  severity: string;
+  supports_element: MedMalRedFlagSupportsElement;
+  severity: MedMalRedFlagSeverity;
   summary: string;
   supporting_event_ids: string[];
 }

@@ -1,6 +1,6 @@
-/**
- * Deterministic red-flag candidates over structured document_events (v1 narrow rules).
- */
+// Deterministic red-flag rules over extracted document_events. Each rule is a
+// pure function that emits at most one RedFlagInsert; runDeterministicRedFlags
+// dedupes by rule_id.
 
 export type DocumentEventRow = {
     id: string;
@@ -46,7 +46,7 @@ function ruleDelayedDx(events: DocumentEventRow[]): RedFlagInsert | null {
                     rule_id: "delayed_dx",
                     supports_element: "breach",
                     severity: "medium",
-                    summary: `Possible delayed diagnosis: symptoms noted before dx on pages ${s.source_page} and ${d.source_page}.`,
+                    summary: `Possible delayed diagnosis: symptoms dated ${s.event_date} (page ${s.source_page}) precede diagnosis dated ${d.event_date} (page ${d.source_page}).`,
                     supporting_event_ids: [s.id, d.id],
                 };
             }
@@ -80,7 +80,7 @@ function ruleRetainedForeignObject(
         if (
             (n.includes("retained") && n.includes("foreign")) ||
             (n.includes("sponge") && n.includes("count")) ||
-            procs.includes("hardware") && n.includes("unaccounted")
+            (procs.includes("hardware") && n.includes("unaccounted"))
         ) {
             return {
                 rule_id: "retained_foreign_object",
@@ -134,7 +134,7 @@ function ruleInformedConsentGap(events: DocumentEventRow[]): RedFlagInsert | nul
             rule_id: "informed_consent_gap",
             supports_element: "duty",
             severity: "low",
-            summary: `Operative/procedure event on page ${proc.source_page} with no consent event in the extracted log (v1 heuristic).`,
+            summary: `Operative/procedure event on page ${proc.source_page} with no consent event in the extracted log.`,
             supporting_event_ids: [proc.id],
         };
     }

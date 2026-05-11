@@ -1,5 +1,6 @@
 -- Durable extraction jobs for serverless / multi-instance backends.
--- When EXTRACTION_ASYNC_MODE=queue, POST /run enqueues; a worker claims rows via claim_extraction_async_job.
+-- POST /extraction/:doc/run enqueues a row; an in-process worker claims rows
+-- via claim_extraction_async_job() using FOR UPDATE SKIP LOCKED.
 
 create table if not exists public.extraction_async_jobs (
   id uuid primary key default gen_random_uuid(),

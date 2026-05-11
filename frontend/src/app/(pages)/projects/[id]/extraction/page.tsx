@@ -9,7 +9,9 @@ import type {
     MikeDocument,
     MikeProject,
 } from "@/app/components/shared/types";
+import { isTerminalExtractionStatus } from "@/app/components/shared/types";
 import {
+    ApiError,
     getProject,
     getMedMalExtractionStatus,
     listMedMalDocumentEvents,
@@ -34,6 +36,10 @@ function ProjectExtractionPage({ projectId }: { projectId: string }) {
         h: number;
     } | null>(null);
     const [runBusy, setRunBusy] = useState(false);
+    // Increments on each "Run extraction" click so the polling effect
+    // restarts even when selectedDocId hasn't changed (e.g. user re-runs
+    // after a previous terminal state stopped the interval).
+    const [pollEpoch, setPollEpoch] = useState(0);
     const redFlagCycleRef = useRef<{ flagId: string; idx: number }>({
         flagId: "",
         idx: 0,
@@ -47,9 +53,11 @@ function ProjectExtractionPage({ projectId }: { projectId: string }) {
             ]);
             setEvents(ev.events);
             setFlags(rf.red_flags);
-        } catch {
-            setEvents([]);
-            setFlags([]);
+        } catch (e) {
+            // Keep last-good state on transient failures; just log so the
+            // developer can see what happened. Empty-state would otherwise
+            // look identical to "extraction has no findings".
+            console.error("[extraction-page/refreshLists]", e);
         }
     }, []);
 
@@ -76,27 +84,47 @@ function ProjectExtractionPage({ projectId }: { projectId: string }) {
     useEffect(() => {
         if (!selectedDocId) return;
         let cancelled = false;
+        let intervalId: ReturnType<typeof setInterval> | null = null;
+
         const tick = async () => {
             try {
                 const st = await getMedMalExtractionStatus(selectedDocId);
                 if (cancelled) return;
                 setStatusMsg(
-                    `${st.status} — pages ${st.pages_complete ?? 0}/${st.pages_total ?? "?"}${st.error ? ` (${st.error})` : ""}`,
+                    `${st.status} — pages ${st.pages_complete ?? 0}/${st.pages_total ?? "?"}${
+                        st.status === "failed" && st.error
+                            ? ` (${st.error})`
+                            : ""
+                    }`,
                 );
-                if (st.status === "complete" || st.status === "failed") {
+                if (isTerminalExtractionStatus(st.status)) {
                     await refreshLists(selectedDocId);
+                    if (intervalId) {
+                        clearInterval(intervalId);
+                        intervalId = null;
+                    }
                 }
-            } catch {
-                if (!cancelled) setStatusMsg("No extraction yet — run extraction below.");
+            } catch (e) {
+                if (cancelled) return;
+                if (e instanceof ApiError && e.status === 404) {
+                    setStatusMsg("No extraction yet — run extraction below.");
+                } else if (e instanceof ApiError && e.status === 401) {
+                    setStatusMsg("Session expired — please sign in again.");
+                } else if (e instanceof ApiError && e.status === 403) {
+                    setStatusMsg("You don't have access to this document.");
+                } else {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    setStatusMsg(`Status check failed: ${msg}`);
+                }
             }
         };
         void tick();
-        const id = setInterval(tick, 4000);
+        intervalId = setInterval(tick, 4000);
         return () => {
             cancelled = true;
-            clearInterval(id);
+            if (intervalId) clearInterval(intervalId);
         };
-    }, [selectedDocId, refreshLists]);
+    }, [selectedDocId, refreshLists, pollEpoch]);
 
     async function handleRun() {
         if (!selectedDocId) return;
@@ -105,6 +133,7 @@ function ProjectExtractionPage({ projectId }: { projectId: string }) {
         try {
             await runMedMalExtraction(selectedDocId);
             setStatusMsg("Running…");
+            setPollEpoch((n) => n + 1); // resume polling if it stopped on a prior terminal state
         } catch (e) {
             setStatusMsg(e instanceof Error ? e.message : "Run failed");
         } finally {

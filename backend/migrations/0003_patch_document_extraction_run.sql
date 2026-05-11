@@ -1,4 +1,4 @@
--- Atomic status_seq bump + partial patch for document_extractions (Phase 2).
+-- Atomic status_seq bump + partial patch for document_extractions.
 -- Called from backend via Supabase RPC patch_document_extraction_run.
 
 create or replace function public.patch_document_extraction_run(

@@ -51,28 +51,31 @@ projectChatRouter.post("/", requireAuth, async (req, res) => {
     if (!projectAccess.ok)
         return void res.status(404).json({ detail: "Project not found" });
 
-    const { data: projRow } = await db
+    const { data: projRow, error: projErr } = await db
         .from("projects")
         .select("template_id")
         .eq("id", projectId)
         .single();
+    if (projErr) console.error("[project-chat/template_lookup]", projErr);
     const isMedMalTemplate = projRow?.template_id === "med-mal-case";
 
     let extractionCompleteHint = "";
     if (isMedMalTemplate) {
-        const { data: projDocs } = await db
+        const { data: projDocs, error: docsErr } = await db
             .from("documents")
             .select("id")
             .eq("project_id", projectId);
+        if (docsErr) console.error("[project-chat/project_docs]", docsErr);
         const docIds = (projDocs ?? []).map((d) => d.id as string);
         if (docIds.length > 0) {
-            const { data: doneRow } = await db
+            const { data: doneRow, error: extErr } = await db
                 .from("document_extractions")
                 .select("id")
                 .eq("status", "complete")
                 .in("document_id", docIds)
                 .limit(1)
                 .maybeSingle();
+            if (extErr) console.error("[project-chat/extraction_check]", extErr);
             if (doneRow) {
                 extractionCompleteHint =
                     "\n\nSTRUCTURED EXTRACTION: At least one document in this project has a completed extraction run. Prefer read_event_log / find_events_in_range / read_pdf_page_region over bulk read_document for large medical-record PDFs when you only need timeline-anchored facts.";

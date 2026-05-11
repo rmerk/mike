@@ -5,8 +5,11 @@ import {
 } from "./peerReviewMarkers";
 
 describe("peerReviewMarkers", () => {
-    it("exports the expected marker count", () => {
-        expect(PEER_REVIEW_MARKERS.length).toBe(11);
+    it("includes the canonical Minn. Stat. 145.64 markers", () => {
+        expect(PEER_REVIEW_MARKERS).toContain("peer review");
+        expect(PEER_REVIEW_MARKERS).toContain("M&M conference");
+        expect(PEER_REVIEW_MARKERS).toContain("root cause analysis");
+        expect(PEER_REVIEW_MARKERS).toContain("sentinel event review");
     });
 
     it("detects markers case-insensitively", () => {

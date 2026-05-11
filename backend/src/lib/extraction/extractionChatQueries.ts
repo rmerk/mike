@@ -2,7 +2,24 @@ import type { createServerSupabase } from "../supabase";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
-export async function latestRunIdForDocument(
+export type ChatEventRow = {
+    id: string;
+    event_date: string | null;
+    encounter_type: string | null;
+    narrative: string | null;
+    source_page: number;
+    source_bbox: { x: number; y: number; w: number; h: number };
+    privacy_class?: string;
+};
+
+export type ExtractionQueryResult<T> =
+    | { ok: true; events: T[] }
+    | { ok: false; reason: "no_extraction_run" }
+    | { ok: false; reason: "query_failed"; error: string };
+
+// Only completed runs are exposed to chat tools. A pending/running/failed run
+// would otherwise look like ground truth for a partially-extracted document.
+async function latestCompleteRunIdForDocument(
     db: Db,
     documentId: string,
 ): Promise<string | null> {
@@ -10,6 +27,7 @@ export async function latestRunIdForDocument(
         .from("document_extractions")
         .select("id")
         .eq("document_id", documentId)
+        .eq("status", "complete")
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -20,9 +38,9 @@ export async function listEventsForChat(
     db: Db,
     documentId: string,
     opts: { limit?: number; offset?: number; encounter_type?: string },
-): Promise<unknown[]> {
-    const runId = await latestRunIdForDocument(db, documentId);
-    if (!runId) return [];
+): Promise<ExtractionQueryResult<ChatEventRow>> {
+    const runId = await latestCompleteRunIdForDocument(db, documentId);
+    if (!runId) return { ok: false, reason: "no_extraction_run" };
     let q = db
         .from("document_events")
         .select(
@@ -39,8 +57,8 @@ export async function listEventsForChat(
     const { data, error } = await q
         .order("source_page", { ascending: true })
         .range(off, off + lim - 1);
-    if (error) throw new Error(error.message);
-    return data ?? [];
+    if (error) return { ok: false, reason: "query_failed", error: error.message };
+    return { ok: true, events: (data ?? []) as ChatEventRow[] };
 }
 
 export async function listEventsInDateRange(
@@ -49,9 +67,9 @@ export async function listEventsInDateRange(
     fromIso: string,
     toIso: string,
     encounterType?: string,
-): Promise<unknown[]> {
-    const runId = await latestRunIdForDocument(db, documentId);
-    if (!runId) return [];
+): Promise<ExtractionQueryResult<ChatEventRow>> {
+    const runId = await latestCompleteRunIdForDocument(db, documentId);
+    if (!runId) return { ok: false, reason: "no_extraction_run" };
     let q = db
         .from("document_events")
         .select(
@@ -64,6 +82,6 @@ export async function listEventsInDateRange(
         .lte("event_date", toIso);
     if (encounterType) q = q.eq("encounter_type", encounterType);
     const { data, error } = await q.order("event_date", { ascending: true });
-    if (error) throw new Error(error.message);
-    return data ?? [];
+    if (error) return { ok: false, reason: "query_failed", error: error.message };
+    return { ok: true, events: (data ?? []) as ChatEventRow[] };
 }

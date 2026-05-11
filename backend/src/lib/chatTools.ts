@@ -2052,39 +2052,35 @@ export async function runToolCalls(
                             }),
                         });
                     } else {
-                        try {
-                            const rows = await listEventsForChat(
-                                db,
-                                documentUuid,
-                                {
-                                    limit: (args.limit as number) ?? 50,
-                                    offset: (args.offset as number) ?? 0,
-                                    encounter_type:
-                                        (args.encounter_type as string) ??
-                                        undefined,
-                                },
-                            );
-                            toolResults.push({
-                                role: "tool",
-                                tool_call_id: tc.id,
-                                content: JSON.stringify({
-                                    ok: true,
-                                    events: rows,
-                                }),
-                            });
-                        } catch (e) {
-                            toolResults.push({
-                                role: "tool",
-                                tool_call_id: tc.id,
-                                content: JSON.stringify({
-                                    ok: false,
-                                    error:
-                                        e instanceof Error
-                                            ? e.message
-                                            : String(e),
-                                }),
-                            });
+                        const result = await listEventsForChat(
+                            db,
+                            documentUuid,
+                            {
+                                limit: (args.limit as number) ?? 50,
+                                offset: (args.offset as number) ?? 0,
+                                encounter_type:
+                                    (args.encounter_type as string) ??
+                                    undefined,
+                            },
+                        );
+                        let payload: Record<string, unknown>;
+                        if (result.ok) {
+                            payload = { ok: true, events: result.events };
+                        } else if (result.reason === "no_extraction_run") {
+                            payload = {
+                                ok: false,
+                                reason: "no_extraction_run",
+                                error:
+                                    "No completed extraction for this document yet. Run extraction first.",
+                            };
+                        } else {
+                            payload = { ok: false, error: result.error };
                         }
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify(payload),
+                        });
                     }
                 }
             }
@@ -2128,35 +2124,31 @@ export async function runToolCalls(
                             }),
                         });
                     } else {
-                        try {
-                            const rows = await listEventsInDateRange(
-                                db,
-                                documentUuid,
-                                (args.from_date as string) ?? "",
-                                (args.to_date as string) ?? "",
-                                (args.encounter_type as string) ?? undefined,
-                            );
-                            toolResults.push({
-                                role: "tool",
-                                tool_call_id: tc.id,
-                                content: JSON.stringify({
-                                    ok: true,
-                                    events: rows,
-                                }),
-                            });
-                        } catch (e) {
-                            toolResults.push({
-                                role: "tool",
-                                tool_call_id: tc.id,
-                                content: JSON.stringify({
-                                    ok: false,
-                                    error:
-                                        e instanceof Error
-                                            ? e.message
-                                            : String(e),
-                                }),
-                            });
+                        const result = await listEventsInDateRange(
+                            db,
+                            documentUuid,
+                            (args.from_date as string) ?? "",
+                            (args.to_date as string) ?? "",
+                            (args.encounter_type as string) ?? undefined,
+                        );
+                        let payload: Record<string, unknown>;
+                        if (result.ok) {
+                            payload = { ok: true, events: result.events };
+                        } else if (result.reason === "no_extraction_run") {
+                            payload = {
+                                ok: false,
+                                reason: "no_extraction_run",
+                                error:
+                                    "No completed extraction for this document yet. Run extraction first.",
+                            };
+                        } else {
+                            payload = { ok: false, error: result.error };
                         }
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify(payload),
+                        });
                     }
                 }
             }
@@ -2220,10 +2212,17 @@ export async function runToolCalls(
                             const bb = args.bbox as
                                 | { x: number; y: number; w: number; h: number }
                                 | undefined;
-                            if (
-                                bb &&
-                                [bb.x, bb.y, bb.w, bb.h].every(Number.isFinite)
-                            ) {
+                            if (bb !== undefined) {
+                                if (
+                                    !bb ||
+                                    ![bb.x, bb.y, bb.w, bb.h].every(
+                                        Number.isFinite,
+                                    )
+                                ) {
+                                    throw new Error(
+                                        "bbox must have finite x, y, w, h",
+                                    );
+                                }
                                 items = items.filter((it) => {
                                     const ix2 = it.x + it.w;
                                     const iy2 = it.y + it.h;

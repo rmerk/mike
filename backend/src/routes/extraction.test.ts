@@ -125,6 +125,62 @@ describe("extraction HTTP access", () => {
         expect(res.status).toBe(403);
     });
 
+    it("returns 403 on POST /run when caller does not own the document", async () => {
+        fromMock.mockImplementation((table: string) => {
+            if (table === "documents") {
+                return {
+                    select: () => ({
+                        eq: () => ({
+                            single: async () => ({
+                                data: {
+                                    id: "doc-1",
+                                    user_id: "user-a",
+                                    project_id: null,
+                                    file_type: "application/pdf",
+                                    filename: "a.pdf",
+                                },
+                                error: null,
+                            }),
+                        }),
+                    }),
+                };
+            }
+            throw new Error(`unexpected table ${table}`);
+        });
+        const res = await request(buildApp())
+            .post("/extraction/doc-1/run")
+            .set("Authorization", "Bearer test-token");
+        expect(res.status).toBe(403);
+    });
+
+    it("returns 403 on GET /red-flags when caller does not own the document", async () => {
+        fromMock.mockImplementation((table: string) => {
+            if (table === "documents") {
+                return {
+                    select: () => ({
+                        eq: () => ({
+                            single: async () => ({
+                                data: {
+                                    id: "doc-1",
+                                    user_id: "user-a",
+                                    project_id: null,
+                                    file_type: "application/pdf",
+                                    filename: "a.pdf",
+                                },
+                                error: null,
+                            }),
+                        }),
+                    }),
+                };
+            }
+            throw new Error(`unexpected table ${table}`);
+        });
+        const res = await request(buildApp())
+            .get("/extraction/doc-1/red-flags")
+            .set("Authorization", "Bearer test-token");
+        expect(res.status).toBe(403);
+    });
+
     it("returns 409 when extraction insert hits running unique constraint", async () => {
         fromMock.mockImplementation((table: string) => {
             if (table === "documents") {

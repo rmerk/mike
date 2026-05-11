@@ -1,6 +1,7 @@
 -- 0002_document_extraction.sql
--- Med-mal extraction: event log, red flags, extraction runs (Phase 2).
--- See docs/PLAN_med_mal_extraction_pipeline.md and .cursor/plans/phase_2_extraction_pipeline_f7bd0030.plan.md
+-- Med-mal extraction tables: document_extractions (per-run state),
+-- document_events (timeline rows w/ bbox citations), document_red_flags
+-- (deterministic + LLM-derived issue candidates).
 
 -- ---------------------------------------------------------------------------
 -- document_extractions

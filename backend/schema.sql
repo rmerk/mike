@@ -196,7 +196,7 @@ create index if not exists document_edits_version_id_idx
   on public.document_edits(version_id);
 
 -- ---------------------------------------------------------------------------
--- Med-mal document extraction (Phase 2)
+-- Med-mal document extraction (runs, events, red flags, async job queue)
 -- ---------------------------------------------------------------------------
 
 create table if not exists public.document_extractions (

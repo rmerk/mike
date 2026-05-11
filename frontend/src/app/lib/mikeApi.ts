@@ -48,6 +48,15 @@ async function getAuthHeader(): Promise<Record<string, string>> {
     return { Authorization: `Bearer ${session.access_token}` };
 }
 
+export class ApiError extends Error {
+    readonly status: number;
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = "ApiError";
+        this.status = status;
+    }
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     const authHeaders = await getAuthHeader();
     const { headers: initHeaders, ...restInit } = init ?? {};
@@ -63,7 +72,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
     if (!response.ok) {
         const detail = await response.text();
-        throw new Error(detail || `API error: ${response.status}`);
+        throw new ApiError(
+            response.status,
+            detail || `API error: ${response.status}`,
+        );
     }
 
     if (

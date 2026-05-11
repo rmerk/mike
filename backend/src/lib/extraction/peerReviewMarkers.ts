@@ -1,7 +1,6 @@
-/**
- * Minn. Stat. § 145.64 peer-review markers — case-insensitive scan before extraction.
- * Phrases normalized from docs/PLAN_med_mal_extraction_pipeline.md (two sections merged).
- */
+// Markers that signal peer-review / quality-improvement protected content
+// under Minn. Stat. § 145.64. Extraction halts before any LLM call when any
+// page contains one of these substrings (case-insensitive).
 export const PEER_REVIEW_MARKERS = [
     "peer review",
     "peer-review committee",

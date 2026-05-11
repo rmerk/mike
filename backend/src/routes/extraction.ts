@@ -5,6 +5,7 @@ import { ensureDocAccess } from "../lib/access";
 import { loadActiveVersion } from "../lib/documentVersions";
 import {
     executeMedMalExtraction,
+    resolveExtractionModel,
     resolvePdfPathForVersion,
 } from "../lib/extraction/medMalExtractor";
 import { extractionUsesDbQueue } from "../lib/extraction/extractionQueueMode";
@@ -13,14 +14,27 @@ import { getUserApiKeys } from "../lib/userSettings";
 
 export const extractionRouter = Router();
 
+// Postgres unique-violation SQLSTATE; fires when the partial unique index
+// `document_extractions_one_running_per_document` rejects a concurrent run
+// insert (see migrations/0002_document_extraction.sql).
+const PG_UNIQUE_VIOLATION = "23505";
+
+type LoadedDoc = {
+    id: string;
+    user_id: string;
+    project_id: string | null;
+    file_type: string | null;
+    filename: string;
+};
+
 type DocumentAccessResult =
-    | { ok: true; doc: Record<string, unknown> }
+    | { ok: true; doc: LoadedDoc }
     | { ok: false; status: 403 | 404 };
 
 function respondUnlessDocLoaded(
     loaded: DocumentAccessResult,
     res: Response,
-): loaded is { ok: true; doc: Record<string, unknown> } {
+): loaded is { ok: true; doc: LoadedDoc } {
     if (loaded.ok) return true;
     const detail = loaded.status === 403 ? "Forbidden" : "Not found";
     res.status(loaded.status).json({ detail });
@@ -38,7 +52,7 @@ async function loadDocumentForAccess(
         .select("id, user_id, project_id, file_type, filename")
         .eq("id", documentId)
         .single();
-    if (!doc) return { ok: false as const, status: 404 as const };
+    if (!doc) return { ok: false, status: 404 };
     const access = await ensureDocAccess(
         {
             user_id: doc.user_id as string,
@@ -48,10 +62,16 @@ async function loadDocumentForAccess(
         userEmail,
         db,
     );
-    if (!access.ok) return { ok: false as const, status: 403 as const };
+    if (!access.ok) return { ok: false, status: 403 };
     return {
-        ok: true as const,
-        doc: doc as Record<string, unknown>,
+        ok: true,
+        doc: {
+            id: doc.id as string,
+            user_id: doc.user_id as string,
+            project_id: (doc.project_id as string | null) ?? null,
+            file_type: (doc.file_type as string | null) ?? null,
+            filename: (doc.filename as string | null) ?? "",
+        },
     };
 }
 
@@ -69,7 +89,8 @@ async function latestExtractionRunId(
     return (data?.id as string | undefined) ?? null;
 }
 
-/** Matches UI: extraction runs only for documents in med-mal-case projects. */
+// Extraction runs only for documents in med-mal-case projects
+// (projects.template_id === "med-mal-case").
 async function assertMedMalCaseProject(
     db: ReturnType<typeof createServerSupabase>,
     projectId: string | null,
@@ -135,8 +156,8 @@ extractionRouter.post("/:documentId/run", requireAuth, async (req, res) => {
     if (!respondUnlessDocLoaded(loaded, res)) return;
 
     const doc = loaded.doc;
-    const fileType = String(doc.file_type ?? "").toLowerCase();
-    const filename = String(doc.filename ?? "").toLowerCase();
+    const fileType = (doc.file_type ?? "").toLowerCase();
+    const filename = (doc.filename ?? "").toLowerCase();
     const isPdf =
         fileType.includes("pdf") ||
         filename.endsWith(".pdf") ||
@@ -147,10 +168,7 @@ extractionRouter.post("/:documentId/run", requireAuth, async (req, res) => {
             .json({ detail: "Extraction requires a PDF document" });
     }
 
-    const projectOk = await assertMedMalCaseProject(
-        db,
-        doc.project_id as string | null,
-    );
+    const projectOk = await assertMedMalCaseProject(db, doc.project_id);
     if (!projectOk.ok) {
         return void res.status(422).json({ detail: projectOk.detail });
     }
@@ -168,8 +186,13 @@ extractionRouter.post("/:documentId/run", requireAuth, async (req, res) => {
             .json({ detail: "Active version has no PDF bytes" });
     }
 
-    const model =
-        process.env.MED_MAL_EXTRACTION_MODEL?.trim() || "claude-sonnet-4-6";
+    let model: string;
+    try {
+        model = resolveExtractionModel();
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return void res.status(500).json({ detail: msg });
+    }
     const { data: run, error } = await db
         .from("document_extractions")
         .insert({
@@ -185,7 +208,7 @@ extractionRouter.post("/:documentId/run", requireAuth, async (req, res) => {
         .single();
 
     if (error) {
-        if (error.code === "23505") {
+        if (error.code === PG_UNIQUE_VIOLATION) {
             return void res.status(409).json({
                 detail: "An extraction is already running for this document",
                 code: "extraction_conflict",
@@ -224,15 +247,21 @@ extractionRouter.post("/:documentId/run", requireAuth, async (req, res) => {
             void executeMedMalExtraction({
                 db,
                 documentId,
-                documentVersionId: version.id,
                 runId,
                 userId,
                 pdfStoragePath: pdfPath,
                 apiKeys,
-            }).then((r) => {
-                if (!r.ok)
-                    console.error("[extraction/async]", r.error);
-            });
+            })
+                .then((r) => {
+                    if (!r.ok) console.error("[extraction/async]", r.error);
+                })
+                .catch((e) => {
+                    // executeMedMalExtraction's own catch normally marks the
+                    // run failed; this guard only fires if a thrown error
+                    // escaped that try/catch (e.g. a refactor accident).
+                    const msg = e instanceof Error ? e.message : String(e);
+                    console.error("[extraction/async/unhandled]", msg);
+                });
         });
     }
 
