@@ -3,6 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
     completeClaudeMedMalExtractionPage: vi.fn(),
     insertDocumentEvents: vi.fn(async () => undefined),
+    visionPrescanPeerReviewMarkers: vi.fn(async () => ({
+        markerPages: [] as number[],
+        rasterCache: new Map<
+            number,
+            { rasterKey: string; pngBase64: string }
+        >(),
+    })),
     pageTexts: { value: [] as string[] },
 }));
 
@@ -47,6 +54,10 @@ vi.mock("./pdfRegions", () => ({
     clampBboxToPage: (b: { x: number; y: number; w: number; h: number }) => b,
 }));
 
+vi.mock("./peerReviewVisionPrescan", () => ({
+    visionPrescanPeerReviewMarkers: mocks.visionPrescanPeerReviewMarkers,
+}));
+
 vi.mock("./eventLog", async () => {
     const actual = await vi.importActual<typeof import("./eventLog")>(
         "./eventLog",
@@ -57,7 +68,11 @@ vi.mock("./eventLog", async () => {
     };
 });
 
-const { completeClaudeMedMalExtractionPage, insertDocumentEvents } = mocks;
+const {
+    completeClaudeMedMalExtractionPage,
+    insertDocumentEvents,
+    visionPrescanPeerReviewMarkers,
+} = mocks;
 function setPageTexts(texts: string[]): void {
     mocks.pageTexts.value = texts;
 }
@@ -110,6 +125,11 @@ describe("executeMedMalExtraction peer-review gate", () => {
     beforeEach(() => {
         completeClaudeMedMalExtractionPage.mockReset();
         insertDocumentEvents.mockReset();
+        visionPrescanPeerReviewMarkers.mockReset();
+        visionPrescanPeerReviewMarkers.mockResolvedValue({
+            markerPages: [],
+            rasterCache: new Map(),
+        });
         fromCalls = [];
         rpcCalls = [];
     });
@@ -212,6 +232,54 @@ describe("executeMedMalExtraction peer-review gate", () => {
         expect(inserted).toHaveLength(1);
         expect(inserted[0].encounter_type).toBe("clinic");
         expect(inserted[0].privacy_class).toBe("standard");
+    });
+
+    it("halts when the vision prescan reports markers on a scanned page", async () => {
+        // Empty text on page 2 triggers the vision-prescan candidate path.
+        setPageTexts(["Regular page text", "", "Regular page text"]);
+        visionPrescanPeerReviewMarkers.mockResolvedValueOnce({
+            markerPages: [2],
+            rasterCache: new Map([
+                [2, { rasterKey: "rk/u/d/r/2", pngBase64: "Zm9v" }],
+            ]),
+        });
+
+        const db = makeDb() as unknown as Parameters<
+            typeof executeMedMalExtraction
+        >[0]["db"];
+        const result = await executeMedMalExtraction({
+            db,
+            documentId: "doc-1",
+            runId: "run-1",
+            userId: "user-1",
+            pdfStoragePath: "u/doc/file.pdf",
+            apiKeys: {},
+        });
+
+        expect(result).toEqual({
+            ok: false,
+            error: expect.stringContaining("Minn. Stat. 145.64"),
+        });
+        // The orchestrator must call the vision prescan exactly once, with the
+        // candidate page list (only page 2 here).
+        expect(visionPrescanPeerReviewMarkers).toHaveBeenCalledTimes(1);
+        const prescanArgs = visionPrescanPeerReviewMarkers.mock.calls[0][0] as {
+            pageNums: number[];
+        };
+        expect(prescanArgs.pageNums).toEqual([2]);
+        // No event-extraction call may happen once the gate triggers.
+        expect(completeClaudeMedMalExtractionPage).not.toHaveBeenCalled();
+        // A peer-review red-flag row must reference the vision-detected page.
+        const flagInsert = fromCalls.find(
+            (c) => c.table === "document_red_flags" && c.insert !== undefined,
+        );
+        expect(flagInsert).toBeDefined();
+        const flagRow = flagInsert!.insert as {
+            rule_id: string;
+            summary: string;
+        };
+        expect(flagRow.rule_id).toBe("peer_review_detected");
+        expect(flagRow.summary).toContain("2");
     });
 
     it("coerces peer_review_145_64 from model output to 'standard'", async () => {

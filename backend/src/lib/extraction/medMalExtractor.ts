@@ -24,6 +24,10 @@ import {
     insertDocumentEvents,
     type DocumentEventInsert,
 } from "./eventLog";
+import {
+    visionPrescanPeerReviewMarkers,
+    type RasterCacheEntry,
+} from "./peerReviewVisionPrescan";
 import { runDeterministicRedFlags, type DocumentEventRow } from "./redFlags";
 
 type Db = ReturnType<typeof createServerSupabase>;
@@ -207,6 +211,11 @@ export async function executeMedMalExtraction(params: {
     apiKeys: UserApiKeys;
 }): Promise<MedMalExtractionResult> {
     const { db, documentId, runId, userId, pdfStoragePath, apiKeys } = params;
+    // Track every raster key uploaded during this run (prescan + main loop)
+    // so a single end-of-run sweep can clean them up. The previous per-page
+    // `finally` delete pattern did not allow the prescan to share rasters
+    // with the main loop without leaking them mid-run.
+    const allRasterKeys = new Set<string>();
     try {
         const raw = await downloadFile(pdfStoragePath);
         if (!raw) {
@@ -246,11 +255,63 @@ export async function executeMedMalExtraction(params: {
         }
         await bumpSeq(db, runId, { pages_total: numPages, pages_complete: 0 });
 
+        // Phase 1 prescan: text-layer peer-review marker scan (fast path for
+        // digital PDFs). Phase 2 prescan: vision-based scan over pages whose
+        // text layer is empty (scanned image pages). Both must complete
+        // before any event-extraction call so § 145.64 marker detection
+        // cannot be bypassed by a scanned page mid-document.
         const peerPages: number[] = [];
+        const visionCandidates: number[] = [];
         for (let p = 1; p <= numPages; p++) {
             const items = await getPageItems(pdf, p);
             const plain = itemsToPlainText(items);
-            if (textContainsPeerReviewMarker(plain)) peerPages.push(p);
+            if (textContainsPeerReviewMarker(plain)) {
+                peerPages.push(p);
+            } else if (pageNeedsVisionRaster(items)) {
+                visionCandidates.push(p);
+            }
+        }
+        let visionRasterCache = new Map<number, RasterCacheEntry>();
+        if (visionCandidates.length > 0 && peerPages.length === 0) {
+            // Skip the vision prescan if a text-layer hit already mandates a
+            // halt: the result would not change extraction outcome.
+            if (!storageEnabled) {
+                const errMsg =
+                    "Scanned pages present but object storage (R2) is disabled; cannot run § 145.64 vision prescan.";
+                await bumpSeq(db, runId, {
+                    status: "failed",
+                    error: errMsg,
+                    completed_at: new Date().toISOString(),
+                });
+                return { ok: false, error: errMsg };
+            }
+            try {
+                const prescan = await visionPrescanPeerReviewMarkers({
+                    pdf,
+                    pageNums: visionCandidates,
+                    userId,
+                    documentId,
+                    runId,
+                    model: EXTRACTION_MODEL,
+                    apiKeys,
+                    storageEnabled,
+                });
+                for (const entry of prescan.rasterCache.values()) {
+                    allRasterKeys.add(entry.rasterKey);
+                }
+                visionRasterCache = prescan.rasterCache;
+                for (const p of prescan.markerPages) peerPages.push(p);
+                peerPages.sort((a, b) => a - b);
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                const errMsg = `Vision peer-review prescan failed: ${msg.slice(0, 500)}`;
+                await bumpSeq(db, runId, {
+                    status: "failed",
+                    error: errMsg,
+                    completed_at: new Date().toISOString(),
+                });
+                return { ok: false, error: errMsg };
+            }
         }
         if (peerPages.length > 0) {
             const { error: flagErr } = await db
@@ -292,33 +353,36 @@ export async function executeMedMalExtraction(params: {
         }
 
         for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-            let rasterKey: string | null = null;
-            try {
-                const page = await pdf.getPage(pageNum);
-                const viewport = page.getViewport({ scale: 1.0 });
-                const items = await getPageItems(pdf, pageNum);
-                const needsRaster = pageNeedsVisionRaster(items);
-                let visionB64: string | undefined;
+            const page = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 1.0 });
+            const items = await getPageItems(pdf, pageNum);
+            const needsRaster = pageNeedsVisionRaster(items);
+            let visionB64: string | undefined;
 
-                if (needsRaster) {
-                    if (!storageEnabled) {
-                        const errMsg =
-                            "Scanned page requires object storage (R2) for vision extraction.";
-                        await bumpSeq(db, runId, {
-                            status: "failed",
-                            error: `${errMsg} (page ${pageNum})`,
-                            pages_complete: pageNum - 1,
-                            completed_at: new Date().toISOString(),
-                        });
-                        return { ok: false, error: errMsg };
-                    }
+            if (needsRaster) {
+                if (!storageEnabled) {
+                    const errMsg =
+                        "Scanned page requires object storage (R2) for vision extraction.";
+                    await bumpSeq(db, runId, {
+                        status: "failed",
+                        error: `${errMsg} (page ${pageNum})`,
+                        pages_complete: pageNum - 1,
+                        completed_at: new Date().toISOString(),
+                    });
+                    return { ok: false, error: errMsg };
+                }
+                const cached = visionRasterCache.get(pageNum);
+                if (cached) {
+                    // Reuse the raster the prescan already rendered + uploaded.
+                    visionB64 = cached.pngBase64;
+                } else {
                     try {
                         const { png } = await renderPageToPngBuffer(
                             pdf,
                             pageNum,
                         );
                         visionB64 = png.toString("base64");
-                        rasterKey = extractionPageRasterKey(
+                        const rasterKey = extractionPageRasterKey(
                             userId,
                             documentId,
                             runId,
@@ -332,9 +396,9 @@ export async function executeMedMalExtraction(params: {
                             ) as ArrayBuffer,
                             "image/png",
                         );
+                        allRasterKeys.add(rasterKey);
                     } catch (e) {
-                        const msg =
-                            e instanceof Error ? e.message : String(e);
+                        const msg = e instanceof Error ? e.message : String(e);
                         const errMsg = `Page ${pageNum}: raster/vision failed: ${msg.slice(0, 500)}`;
                         await bumpSeq(db, runId, {
                             status: "failed",
@@ -345,99 +409,91 @@ export async function executeMedMalExtraction(params: {
                         return { ok: false, error: errMsg };
                     }
                 }
+            }
 
-                const pageText = itemsToPlainText(items);
-                const userContent = needsRaster
-                    ? `Page number: ${pageNum}\nPage width (PDF user space): ${viewport.width}\nPage height (PDF user space): ${viewport.height}\n\nA PNG of this page is attached (downscaled if large). Extract events; source_bbox values must be PDF user space coordinates for this width and height.`
-                    : `Page number: ${pageNum}\nPage width: ${viewport.width}\nPage height: ${viewport.height}\n\nPage text (may be incomplete if scanned):\n${pageText.slice(0, 120000)}`;
+            const pageText = itemsToPlainText(items);
+            const userContent = needsRaster
+                ? `Page number: ${pageNum}\nPage width (PDF user space): ${viewport.width}\nPage height (PDF user space): ${viewport.height}\n\nA PNG of this page is attached (downscaled if large). Extract events; source_bbox values must be PDF user space coordinates for this width and height.`
+                : `Page number: ${pageNum}\nPage width: ${viewport.width}\nPage height: ${viewport.height}\n\nPage text (may be incomplete if scanned):\n${pageText.slice(0, 120000)}`;
 
-                let lastErr: Error | null = null;
-                let toInsert: DocumentEventInsert[] = [];
-                for (
-                    let attempt = 0;
-                    attempt <= MAX_JSON_REPAIR_ATTEMPTS;
-                    attempt++
-                ) {
-                    const repair =
-                        attempt > 0
-                            ? `\nYour previous output was invalid JSON. Emit ONLY the JSON object, no prose. Attempt ${attempt + 1}.`
-                            : "";
-                    const rawText = await completeClaudeMedMalExtractionPage({
-                        model: EXTRACTION_MODEL,
-                        systemPrompt: SYSTEM_PROMPT + repair,
-                        userContent,
-                        visionPngBase64: visionB64,
-                        maxTokens: 8192,
-                        apiKeys,
-                    });
-                    if (!rawText.trim()) {
-                        lastErr = new Error("empty model output");
-                        continue;
-                    }
-                    try {
-                        const parsed = parseEventsJson(rawText);
-                        const normalized = normalizeLlmEvents(
-                            parsed,
-                            documentId,
+            let lastErr: Error | null = null;
+            let toInsert: DocumentEventInsert[] = [];
+            for (
+                let attempt = 0;
+                attempt <= MAX_JSON_REPAIR_ATTEMPTS;
+                attempt++
+            ) {
+                const repair =
+                    attempt > 0
+                        ? `\nYour previous output was invalid JSON. Emit ONLY the JSON object, no prose. Attempt ${attempt + 1}.`
+                        : "";
+                const rawText = await completeClaudeMedMalExtractionPage({
+                    model: EXTRACTION_MODEL,
+                    systemPrompt: SYSTEM_PROMPT + repair,
+                    userContent,
+                    visionPngBase64: visionB64,
+                    maxTokens: 8192,
+                    apiKeys,
+                });
+                if (!rawText.trim()) {
+                    lastErr = new Error("empty model output");
+                    continue;
+                }
+                try {
+                    const parsed = parseEventsJson(rawText);
+                    const normalized = normalizeLlmEvents(
+                        parsed,
+                        documentId,
+                        runId,
+                        pageNum,
+                        viewport.width,
+                        viewport.height,
+                    );
+                    toInsert = normalized.events;
+                    if (hasAnyDrops(normalized.dropped)) {
+                        console.warn("[extraction/normalize_dropped]", {
                             runId,
                             pageNum,
-                            viewport.width,
-                            viewport.height,
-                        );
-                        toInsert = normalized.events;
-                        if (hasAnyDrops(normalized.dropped)) {
-                            console.warn(
-                                "[extraction/normalize_dropped]",
-                                {
-                                    runId,
-                                    pageNum,
-                                    kept: normalized.events.length,
-                                    dropped: normalized.dropped,
-                                },
-                            );
-                        }
-                        lastErr = null;
-                        break;
-                    } catch (e) {
-                        lastErr =
-                            e instanceof Error
-                                ? e
-                                : new Error("JSON parse failed");
-                    }
-                }
-                if (lastErr) {
-                    const errMsg = `Page ${pageNum}: ${lastErr.message}`;
-                    await bumpSeq(db, runId, {
-                        status: "failed",
-                        error: errMsg,
-                        pages_complete: pageNum - 1,
-                        completed_at: new Date().toISOString(),
-                    });
-                    return { ok: false, error: errMsg };
-                }
-                if (toInsert.length) {
-                    try {
-                        await insertDocumentEvents(db, toInsert);
-                    } catch (e) {
-                        // Per-page persistence failures (bad citation, DB
-                        // error) must not abort the whole run after partial
-                        // pages already landed. Log and continue with the
-                        // next page.
-                        const msg = e instanceof Error ? e.message : String(e);
-                        console.error("[extraction/insertDocumentEvents]", {
-                            runId,
-                            pageNum,
-                            error: msg,
+                            kept: normalized.events.length,
+                            dropped: normalized.dropped,
                         });
                     }
+                    lastErr = null;
+                    break;
+                } catch (e) {
+                    lastErr =
+                        e instanceof Error
+                            ? e
+                            : new Error("JSON parse failed");
                 }
-                await bumpSeq(db, runId, { pages_complete: pageNum });
-            } finally {
-                if (rasterKey)
-                    await deleteFile(rasterKey).catch(() => {
-                        /* best-effort */
-                    });
             }
+            if (lastErr) {
+                const errMsg = `Page ${pageNum}: ${lastErr.message}`;
+                await bumpSeq(db, runId, {
+                    status: "failed",
+                    error: errMsg,
+                    pages_complete: pageNum - 1,
+                    completed_at: new Date().toISOString(),
+                });
+                return { ok: false, error: errMsg };
+            }
+            if (toInsert.length) {
+                try {
+                    await insertDocumentEvents(db, toInsert);
+                } catch (e) {
+                    // Per-page persistence failures (bad citation, DB
+                    // error) must not abort the whole run after partial
+                    // pages already landed. Log and continue with the
+                    // next page.
+                    const msg = e instanceof Error ? e.message : String(e);
+                    console.error("[extraction/insertDocumentEvents]", {
+                        runId,
+                        pageNum,
+                        error: msg,
+                    });
+                }
+            }
+            await bumpSeq(db, runId, { pages_complete: pageNum });
         }
 
         const { data: eventRows } = await db
@@ -489,6 +545,19 @@ export async function executeMedMalExtraction(params: {
             /* ignore secondary failure */
         }
         return { ok: false, error: msg.slice(0, 2000) };
+    } finally {
+        // Best-effort end-of-run raster sweep. Both prescan- and main-loop-
+        // owned rasters go through this single path so a failure mid-run
+        // does not leak R2 objects.
+        if (allRasterKeys.size > 0) {
+            await Promise.all(
+                Array.from(allRasterKeys).map((key) =>
+                    deleteFile(key).catch(() => {
+                        /* best-effort */
+                    }),
+                ),
+            );
+        }
     }
 }
 
