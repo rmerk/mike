@@ -17,6 +17,13 @@ import {
     attachActiveVersionPaths,
     loadActiveVersion,
 } from "./documentVersions";
+import { listEventsForChat, listEventsInDateRange } from "./extraction/extractionChatQueries";
+import {
+    loadPdfFromBuffer,
+    getPageItems,
+    itemsToPlainText,
+} from "./extraction/pdfRegions";
+import { resolvePdfPathForVersion } from "./extraction/medMalExtractor";
 import {
     streamChatWithTools,
     resolveModel,
@@ -445,6 +452,75 @@ export const TOOLS = [
                     },
                 },
                 required: ["doc_id", "edits"],
+            },
+        },
+    },
+];
+
+/** Med-mal project chat: structured extraction event log + PDF page text tools. */
+export const MED_MAL_EXTRACTION_TOOLS: OpenAIToolSchema[] = [
+    {
+        type: "function",
+        function: {
+            name: "read_event_log",
+            description:
+                "List structured timeline events from the latest completed extraction for a project PDF. Use doc_id slug (e.g. doc-0). Prefer this over read_document for large charts when an extraction exists.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: { type: "string", description: "Project doc slug" },
+                    limit: { type: "integer", description: "Max rows (default 50, max 200)" },
+                    offset: { type: "integer" },
+                    encounter_type: {
+                        type: "string",
+                        description: "Optional filter: admission|ed|clinic|lab|imaging|op|nursing|note",
+                    },
+                },
+                required: ["doc_id"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "find_events_in_range",
+            description:
+                "Query extracted events between two ISO dates (inclusive) on event_date.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: { type: "string" },
+                    from_date: { type: "string", description: "ISO date YYYY-MM-DD" },
+                    to_date: { type: "string", description: "ISO date YYYY-MM-DD" },
+                    encounter_type: { type: "string" },
+                },
+                required: ["doc_id", "from_date", "to_date"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "read_pdf_page_region",
+            description:
+                "Return pdf.js text runs for a single page (PDF user-space coordinates). Optional bbox filters items overlapping the rectangle.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: { type: "string" },
+                    page: { type: "integer", description: "1-based page number" },
+                    bbox: {
+                        type: "object",
+                        description: "Optional {x,y,w,h} in PDF user space",
+                        properties: {
+                            x: { type: "number" },
+                            y: { type: "number" },
+                            w: { type: "number" },
+                            h: { type: "number" },
+                        },
+                    },
+                },
+                required: ["doc_id", "page"],
             },
         },
     },
@@ -1936,10 +2012,261 @@ export async function runToolCalls(
                 });
             }
             toolResults.push({ role: "tool", tool_call_id: tc.id, content });
+        } else if (tc.function.name === "read_event_log") {
+            if (!projectId) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: "read_event_log is only available in project chat.",
+                    }),
+                });
+            } else {
+                const rawDocId = args.doc_id as string;
+                const docId =
+                    resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+                const documentUuid = docIndex?.[docId]?.document_id;
+                if (!documentUuid) {
+                    toolResults.push({
+                        role: "tool",
+                        tool_call_id: tc.id,
+                        content: JSON.stringify({
+                            ok: false,
+                            error: "Unknown doc_id",
+                        }),
+                    });
+                } else {
+                    const { data: docRow } = await db
+                        .from("documents")
+                        .select("project_id")
+                        .eq("id", documentUuid)
+                        .single();
+                    if (docRow?.project_id !== projectId) {
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify({
+                                ok: false,
+                                error: "Document not in this project",
+                            }),
+                        });
+                    } else {
+                        const result = await listEventsForChat(
+                            db,
+                            documentUuid,
+                            {
+                                limit: (args.limit as number) ?? 50,
+                                offset: (args.offset as number) ?? 0,
+                                encounter_type:
+                                    (args.encounter_type as string) ??
+                                    undefined,
+                            },
+                        );
+                        let payload: Record<string, unknown>;
+                        if (result.ok) {
+                            payload = { ok: true, events: result.events };
+                        } else if (result.reason === "no_extraction_run") {
+                            payload = {
+                                ok: false,
+                                reason: "no_extraction_run",
+                                error:
+                                    "No completed extraction for this document yet. Run extraction first.",
+                            };
+                        } else {
+                            payload = { ok: false, error: result.error };
+                        }
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify(payload),
+                        });
+                    }
+                }
+            }
+        } else if (tc.function.name === "find_events_in_range") {
+            if (!projectId) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: "find_events_in_range is only available in project chat.",
+                    }),
+                });
+            } else {
+                const rawDocId = args.doc_id as string;
+                const docId =
+                    resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+                const documentUuid = docIndex?.[docId]?.document_id;
+                if (!documentUuid) {
+                    toolResults.push({
+                        role: "tool",
+                        tool_call_id: tc.id,
+                        content: JSON.stringify({
+                            ok: false,
+                            error: "Unknown doc_id",
+                        }),
+                    });
+                } else {
+                    const { data: docRow } = await db
+                        .from("documents")
+                        .select("project_id")
+                        .eq("id", documentUuid)
+                        .single();
+                    if (docRow?.project_id !== projectId) {
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify({
+                                ok: false,
+                                error: "Document not in this project",
+                            }),
+                        });
+                    } else {
+                        const result = await listEventsInDateRange(
+                            db,
+                            documentUuid,
+                            (args.from_date as string) ?? "",
+                            (args.to_date as string) ?? "",
+                            (args.encounter_type as string) ?? undefined,
+                        );
+                        let payload: Record<string, unknown>;
+                        if (result.ok) {
+                            payload = { ok: true, events: result.events };
+                        } else if (result.reason === "no_extraction_run") {
+                            payload = {
+                                ok: false,
+                                reason: "no_extraction_run",
+                                error:
+                                    "No completed extraction for this document yet. Run extraction first.",
+                            };
+                        } else {
+                            payload = { ok: false, error: result.error };
+                        }
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify(payload),
+                        });
+                    }
+                }
+            }
+        } else if (tc.function.name === "read_pdf_page_region") {
+            if (!projectId) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: "read_pdf_page_region is only available in project chat.",
+                    }),
+                });
+            } else {
+                const rawDocId = args.doc_id as string;
+                const docId =
+                    resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+                const documentUuid = docIndex?.[docId]?.document_id;
+                const pageNum = args.page as number;
+                if (!documentUuid || typeof pageNum !== "number") {
+                    toolResults.push({
+                        role: "tool",
+                        tool_call_id: tc.id,
+                        content: JSON.stringify({
+                            ok: false,
+                            error: "Invalid doc_id or page",
+                        }),
+                    });
+                } else {
+                    const { data: docRow } = await db
+                        .from("documents")
+                        .select("project_id")
+                        .eq("id", documentUuid)
+                        .single();
+                    if (docRow?.project_id !== projectId) {
+                        toolResults.push({
+                            role: "tool",
+                            tool_call_id: tc.id,
+                            content: JSON.stringify({
+                                ok: false,
+                                error: "Document not in this project",
+                            }),
+                        });
+                    } else {
+                        try {
+                            const ver = await loadActiveVersion(
+                                documentUuid,
+                                db,
+                            );
+                            if (!ver) throw new Error("No active version");
+                            const path = await resolvePdfPathForVersion(ver);
+                            if (!path)
+                                throw new Error("No PDF path for version");
+                            const buf = await downloadFile(path);
+                            if (!buf) throw new Error("Download failed");
+                            const pdf = await loadPdfFromBuffer(buf);
+                            if (pageNum < 1 || pageNum > pdf.numPages) {
+                                throw new Error("Page out of range");
+                            }
+                            let items = await getPageItems(pdf, pageNum);
+                            const bb = args.bbox as
+                                | { x: number; y: number; w: number; h: number }
+                                | undefined;
+                            if (bb !== undefined) {
+                                if (
+                                    !bb ||
+                                    ![bb.x, bb.y, bb.w, bb.h].every(
+                                        Number.isFinite,
+                                    )
+                                ) {
+                                    throw new Error(
+                                        "bbox must have finite x, y, w, h",
+                                    );
+                                }
+                                items = items.filter((it) => {
+                                    const ix2 = it.x + it.w;
+                                    const iy2 = it.y + it.h;
+                                    const bx2 = bb.x + bb.w;
+                                    const by2 = bb.y + bb.h;
+                                    return !(
+                                        ix2 < bb.x ||
+                                        it.x > bx2 ||
+                                        iy2 < bb.y ||
+                                        it.y > by2
+                                    );
+                                });
+                            }
+                            toolResults.push({
+                                role: "tool",
+                                tool_call_id: tc.id,
+                                content: JSON.stringify({
+                                    ok: true,
+                                    page: pageNum,
+                                    plain_text: itemsToPlainText(items),
+                                    items,
+                                }),
+                            });
+                        } catch (e) {
+                            toolResults.push({
+                                role: "tool",
+                                tool_call_id: tc.id,
+                                content: JSON.stringify({
+                                    ok: false,
+                                    error:
+                                        e instanceof Error
+                                            ? e.message
+                                            : String(e),
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
         } else if (tc.function.name === "list_documents") {
             const list = Array.from(docStore.entries()).map(
                 ([doc_id, info]) => ({
                     doc_id,
+                    document_id: docIndex?.[doc_id]?.document_id ?? null,
                     filename: info.filename,
                     file_type: info.file_type,
                 }),

@@ -11,6 +11,7 @@ import { tabularRouter } from "./routes/tabular";
 import { workflowsRouter } from "./routes/workflows";
 import { userRouter } from "./routes/user";
 import { downloadsRouter } from "./routes/downloads";
+import { extractionRouter } from "./routes/extraction";
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -65,6 +66,12 @@ const chatCreateLimiter = makeLimiter({
   max: envInt("RATE_LIMIT_CHAT_CREATE_MAX", 60),
 });
 
+const extractionLimiter = makeLimiter({
+  windowMs: minutes(envInt("RATE_LIMIT_EXTRACTION_WINDOW_MINUTES", 15)),
+  max: envInt("RATE_LIMIT_EXTRACTION_MAX", 20),
+  message: "Too many extraction requests. Please try again later.",
+});
+
 const uploadLimiter = makeLimiter({
   windowMs: hours(envInt("RATE_LIMIT_UPLOAD_WINDOW_HOURS", 1)),
   max: envInt("RATE_LIMIT_UPLOAD_MAX", 50),
@@ -109,6 +116,12 @@ app.post("/single-documents", uploadLimiter);
 app.post("/single-documents/:documentId/versions", uploadLimiter);
 app.post("/projects/:projectId/documents", uploadLimiter);
 
+// Limiter applies only to the POST that spawns a run; GET status/events/red-flags
+// are polled by the extraction page every few seconds and would otherwise 429.
+app.post("/extraction/:documentId/run", extractionLimiter);
+
+app.use("/extraction", extractionRouter);
+
 app.use("/chat", chatRouter);
 app.use("/projects", projectsRouter);
 app.use("/projects/:projectId/chat", projectChatRouter);
@@ -121,6 +134,9 @@ app.use("/download", downloadsRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
+import { startExtractionJobWorker } from "./lib/extraction/extractionJobWorker";
+
 app.listen(PORT, () => {
   console.log(`Mike backend running on port ${PORT}`);
+  startExtractionJobWorker();
 });

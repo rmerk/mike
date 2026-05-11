@@ -16,6 +16,9 @@ import type {
     MikeWorkflow,
     TabularReview,
     TabularReviewDetailOut,
+    MedMalExtractionStatus,
+    MedMalDocumentEvent,
+    MedMalRedFlag,
 } from "@/app/components/shared/types";
 
 // Server-side shape before mapping
@@ -45,6 +48,15 @@ async function getAuthHeader(): Promise<Record<string, string>> {
     return { Authorization: `Bearer ${session.access_token}` };
 }
 
+export class ApiError extends Error {
+    readonly status: number;
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = "ApiError";
+        this.status = status;
+    }
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     const authHeaders = await getAuthHeader();
     const { headers: initHeaders, ...restInit } = init ?? {};
@@ -60,7 +72,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
     if (!response.ok) {
         const detail = await response.text();
-        throw new Error(detail || `API error: ${response.status}`);
+        throw new ApiError(
+            response.status,
+            detail || `API error: ${response.status}`,
+        );
     }
 
     if (
@@ -863,4 +878,36 @@ export async function deleteWorkflowShare(
     await apiRequest(`/workflows/${workflowId}/shares/${shareId}`, {
         method: "DELETE",
     });
+}
+
+// ---------------------------------------------------------------------------
+// Med-mal extraction
+// ---------------------------------------------------------------------------
+
+export async function runMedMalExtraction(
+    documentId: string,
+): Promise<{ run_id: string; status: string }> {
+    return apiRequest(`/extraction/${documentId}/run`, { method: "POST" });
+}
+
+export async function getMedMalExtractionStatus(
+    documentId: string,
+): Promise<MedMalExtractionStatus> {
+    return apiRequest(`/extraction/${documentId}/status`);
+}
+
+export async function listMedMalDocumentEvents(
+    documentId: string,
+    runId?: string,
+): Promise<{ run_id: string; events: MedMalDocumentEvent[] }> {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    return apiRequest(`/extraction/${documentId}/events${qs}`);
+}
+
+export async function listMedMalRedFlags(
+    documentId: string,
+    runId?: string,
+): Promise<{ run_id: string; red_flags: MedMalRedFlag[] }> {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    return apiRequest(`/extraction/${documentId}/red-flags${qs}`);
 }
