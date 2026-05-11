@@ -1,24 +1,40 @@
 ---
 name: Extraction next steps
-overview: "Phase 2 med-mal extraction is implemented locally; next validate Supabase DDL/RPC, ship commits, close gaps (raster/vision), add Vitest/integration coverage, decide on durable jobs. Execution must follow Supabase + Vitest skills (and Postgres best-practices when touching SQL)."
+overview: "Phase 2 med-mal extraction is shipped on `feat/extraction-phase2` (PR #2 OPEN). Remaining work to merge: §145.64 vision-page peer-review prescan (compliance gap), 0005 index migration, malformed-PDF crash smoke, backend CI workflow."
 todos:
   - id: supabase-ddl-rpc
-    content: Apply 0002 + 0003 to target Supabase; verify RPC `patch_document_extraction_run` callable from backend; fix GRANT if needed
+    content: "Shipped: migrations 0002–0004 applied to qkfcrsrtualqdmqqexpf; patch_document_extraction_run grants confirmed for service_role."
+    status: completed
   - id: smoke-build-tests
-    content: Run backend `npm run build` + `npm test`; manual run/status/events flow on sample PDF
+    content: "Shipped: backend `npm run build` + `npm test` green locally; manual run/status flow exercised."
+    status: completed
   - id: commit-phase2-split
-    content: Land uncommitted extraction work as ordered `feat(extraction):` commits and open PR(s)
+    content: "Shipped as feat(extraction): … commits on feat/extraction-phase2; PR #2 OPEN on rmerk/mike."
+    status: completed
   - id: sync-plan-tracker
-    content: Update phase_2 Cursor plan YAML todos / doc to reflect done vs remaining
+    content: "Shipped: phase_2_extraction_pipeline_f7bd0030 reflects done vs remaining."
+    status: completed
   - id: raster-vision-gap
-    content: Design + implement raster path for blank text pages + Claude vision (storage keys lifecycle per Phase 2 roadmap doc section 2)
-    dependencies: [supabase-ddl-rpc, commit-phase2-split]
+    content: "Shipped: pdfRegions.ts exports `renderPageToPngBuffer` (2048px edge cap) and `pageNeedsVisionRaster`; medMalExtractor.ts rasters empty-text pages and calls Claude vision via `completeClaudeMedMalExtractionPage` with `visionPngBase64`."
+    status: completed
   - id: extraction-http-tests
-    content: Add supertest-style negative access tests + optional concurrency 409 assertions
-    dependencies: [commit-phase2-split]
+    content: "Shipped: negative-access tests for extraction routes (wrong user / wrong doc → 403/404)."
+    status: completed
   - id: durable-queue-followup
-    content: "If deploy target is serverless: replace setImmediate continuation with queued worker"
-    dependencies: [commit-phase2-split]
+    content: "Shipped: EXTRACTION_ASYNC_MODE=queue + extraction_async_jobs table + worker (migration 0004)."
+    status: completed
+  - id: vision-peer-review-prescan
+    content: "Add vision pass to §145.64 prescan: rasterize empty-text-layer pages and ask Claude for {has_peer_review_markers, matched_phrase} before any event extraction. Cache rasters for the main loop. New peerReviewVisionPrescan.ts + tests."
+    status: pending
+  - id: index-extraction-async-jobs
+    content: "Migration 0005: index on extraction_async_jobs(document_id) to clear Supabase unindexed-FK advisor INFO; mirror in schema.sql; apply via Supabase MCP."
+    status: pending
+  - id: malformed-pdf-smoke
+    content: "Add Vitest spec asserting loadPdfFromBuffer throws on malformed bytes and executeMedMalExtraction surfaces a non-leaking `Failed to open PDF:` error."
+    status: pending
+  - id: backend-ci
+    content: "Add .github/workflows/backend-ci.yml: Node 22, npm ci → npm run build → npm test, scoped to backend/** path filter."
+    status: pending
 isProject: false
 ---
 
@@ -40,15 +56,19 @@ Optional hygiene (repository conventions): after a significant milestone, update
 
 ## Where things stand
 
-**Implemented in code** (mostly untracked / modified per git):
+**Shipped on `feat/extraction-phase2`** (PR #2 OPEN on rmerk/mike):
 
-- **DB:** [`backend/migrations/0002_document_extraction.sql`](../../backend/migrations/0002_document_extraction.sql) (tables `document_extractions`, `document_events`, `document_red_flags` + RLS), [`backend/migrations/0003_patch_document_extraction_run.sql`](../../backend/migrations/0003_patch_document_extraction_run.sql) for `patch_document_extraction_run`; mirrored in [`backend/schema.sql`](../../backend/schema.sql).
-- **API:** [`backend/src/routes/extraction.ts`](../../backend/src/routes/extraction.ts) — `POST /:documentId/run` (409 on concurrent run), `GET …/status`, `GET …/events` and `/red-flags` (peer-review filtered). Mounted with a dedicated limiter in [`backend/src/index.ts`](../../backend/src/index.ts).
-- **Orchestrator:** [`backend/src/lib/extraction/medMalExtractor.ts`](../../backend/src/lib/extraction/medMalExtractor.ts) — PDF load, peer-review prescan halt, per-page Claude JSON, events insert, deterministic red flags, RPC status patches.
-- **Primitives:** [`pdfRegions.ts`](../../backend/src/lib/extraction/pdfRegions.ts) — text layer only (**no raster / vision fallback**).
-- **UI + client:** extraction page, `mikeApi` helpers, `ProjectPage` link.
-- **Chat:** extraction-backed tools in [`chatTools.ts`](../../backend/src/lib/chatTools.ts).
-- **Tests:** Vitest unit tests for event log / peer-review markers only; **no HTTP extraction route tests**.
+- **DB:** [`0002_document_extraction.sql`](../../backend/migrations/0002_document_extraction.sql), [`0003_patch_document_extraction_run.sql`](../../backend/migrations/0003_patch_document_extraction_run.sql), [`0004_extraction_async_jobs.sql`](../../backend/migrations/0004_extraction_async_jobs.sql); mirrored in [`backend/schema.sql`](../../backend/schema.sql). Applied to `qkfcrsrtualqdmqqexpf`.
+- **API:** [`backend/src/routes/extraction.ts`](../../backend/src/routes/extraction.ts) — `POST /:documentId/run` (409 on concurrent), `GET …/status`, `GET …/events` and `/red-flags` (peer-review filtered). Dedicated `extractionLimiter` in [`backend/src/index.ts`](../../backend/src/index.ts).
+- **Orchestrator:** [`backend/src/lib/extraction/medMalExtractor.ts`](../../backend/src/lib/extraction/medMalExtractor.ts) — PDF load, **text-layer** peer-review prescan halt, per-page Claude JSON, events insert, deterministic red flags, RPC status patches.
+- **Primitives:** [`pdfRegions.ts`](../../backend/src/lib/extraction/pdfRegions.ts) exports `renderPageToPngBuffer` (2048px edge cap, OOM-safe downscale), `pageNeedsVisionRaster`, `clampBboxToPage`. Vision path active in the per-page loop for empty-text pages.
+- **Vision:** [`completeClaudeMedMalExtractionPage`](../../backend/src/lib/llm/claude.ts) takes optional `visionPngBase64`; raster cached at `extractionPageRasterKey(userId, documentId, runId, pageNum)` per run.
+- **Queue worker:** `EXTRACTION_ASYNC_MODE=queue` + [`extraction_async_jobs`](../../backend/migrations/0004_extraction_async_jobs.sql) + claimed-by-instance worker (durable behind `EXTRACTION_JOB_POLL_MS`).
+- **UI + client:** extraction page with bbox highlighting, `mikeApi` helpers, `ProjectPage` link.
+- **Chat:** extraction-backed tools in [`chatTools.ts`](../../backend/src/lib/chatTools.ts); med-mal chat prefers event-log retrieval when extraction is complete.
+- **Tests:** Vitest unit + supertest HTTP coverage (peer-review gate, auth POST/GET, worker, event log, peer-review markers, route access). 
+
+**Compliance gap (open):** the prescan at [`medMalExtractor.ts:249-254`](../../backend/src/lib/extraction/medMalExtractor.ts) reads only the text layer. Scanned pages with §145.64 marker phrases visible only in the raster pass the gate silently — see todo `vision-peer-review-prescan`.
 
 ```mermaid
 flowchart LR
@@ -69,33 +89,19 @@ flowchart LR
 
 ---
 
-## Near-term ship checklist
+## Pre-merge work units (blocking PR #2)
 
-1. **Supabase (skill-guided):** Apply `0002` then `0003`; verify RPC with `execute_sql` or a minimal Node call; run **advisors**; fix any security/index warnings tied to new tables.
-2. **Backend:** `npm run build` and `npm test` in `backend/`; manual `POST …/run` + poll `GET …/status`.
-3. **Frontend:** Smoke `/projects/:id/extraction` on a `med-mal-case` project.
-4. **Commits:** Multiple `feat(extraction): …` commits per roadmap.
-5. **Tracker:** Refresh [`.cursor/plans/phase_2_extraction_pipeline_f7bd0030.plan.md`](phase_2_extraction_pipeline_f7bd0030.plan.md) checklist vs reality.
-
----
-
-## Roadmap deltas
-
-| Gap | Follow-up |
-|-----|-----------|
-| Zero text layer / scanned PDFs | Raster + vision path in `pdfRegions` / storage + Claude multimodal slice. |
-| Gemini behind flag | Defer unless required; mirror JSON schema + tests when added. |
-| Atomic events + flags | Optional single transaction if partial reads become an issue. |
+1. **§145.64 vision-page peer-review prescan** (compliance critical) — new [`peerReviewVisionPrescan.ts`](../../backend/src/lib/extraction/peerReviewVisionPrescan.ts) renders empty-text pages, asks Claude for `{has_peer_review_markers, matched_phrase}` (canonical [`PEER_REVIEW_MARKERS`](../../backend/src/lib/extraction/peerReviewMarkers.ts) embedded in the prompt). Cache rasters in a `Map<pageNum, rasterKey>` so the main loop reuses them; lift per-page deletion to an after-loop sweep. Batch up to 4 pages per Claude call.
+2. **0005 migration** — `create index if not exists extraction_async_jobs_document_id_idx on public.extraction_async_jobs (document_id);` Mirror in [`schema.sql`](../../backend/schema.sql); apply via `mcp__supabase__apply_migration` on `qkfcrsrtualqdmqqexpf`; verify with `get_advisors --type performance`.
+3. **Malformed-PDF crash smoke** — Vitest spec asserting `loadPdfFromBuffer` throws and `executeMedMalExtraction` surfaces a `Failed to open PDF:` error sliced to ≤200 chars.
+4. **Backend CI** — [`.github/workflows/backend-ci.yml`](../../.github/workflows/backend-ci.yml) — Node 22, `npm ci → npm run build → npm test`, scoped to `backend/**` path filter.
 
 ---
 
-## Quality
+## Out of scope this batch (Phase 3+)
 
-- **HTTP negatives (Vitest + supertest optional):** wrong-user / wrong-doc → 403/404.
-- **CI:** Add backend `npm test` + `npm run build` when CI exists.
-
----
-
-## Deployment
-
-`setImmediate` after `202` is fragile on serverless; move to a **durable queue** when hosting target demands it ([`AGENTS.md`](../../AGENTS.md)).
+- Gemini multimodal extraction (still behind unimplemented `EXTRACTION_VISION_PROVIDER` flag).
+- Atomic events+flags single transaction (deferred unless partial-read issues surface).
+- §144.293 mental-health redaction-by-default automation; Rule 408 narrative prefix automation.
+- Phase 3 — templates ↔ extraction integration (tabular reviews populate from `document_events`).
+- Phase 4 — `projects.key_dates jsonb` + deadline-tracking widget.
