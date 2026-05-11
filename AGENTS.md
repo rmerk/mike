@@ -9,3 +9,4 @@
 - For Phase 2 extraction, canonical module names in code are `pdfRegions.ts` and `redFlags.ts`, not the roadmap alternates `pdfPages.ts` / `redFlagRules.ts`.
 - Extraction-feature commits use the prefix `feat(extraction):` per the roadmap sequencing convention.
 - The backend Supabase client uses the service role on the server; Postgres RLS does not protect tenants by itself on those paths—routes must enforce document and project access in application code.
+- Med-mal extraction (`POST /extraction/:documentId/run`) uses `setImmediate` after a `202` by default. For **serverless or multi-instance** backends, set `EXTRACTION_ASYNC_MODE=queue` so jobs persist in `extraction_async_jobs` and a worker process calls `claim_extraction_async_job`; otherwise a recycled HTTP instance can drop in-flight work.
