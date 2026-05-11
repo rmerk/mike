@@ -9,7 +9,7 @@ todos:
     content: Implement backend/src/lib/extraction/pdfRegions.ts (+ raster fallback, max dims [INSERT: px], OOM-safe downscale, R2 key helper with lifecycle/orphan cleanup on failed run — see §2)
     status: completed
   - id: llm-multimodal
-    content: Extend llm types + claude.ts for extraction multimodal JSON; Gemini behind EXTRACTION_VISION_PROVIDER (or similar) when parity exists — v1 production default Claude-only (see §3)
+    content: "Claude multimodal JSON for extraction (incl. vision path) shipped in claude.ts; Gemini behind EXTRACTION_VISION_PROVIDER still deferred per roadmap §3"
     status: completed
   - id: eventlog-redflags
     content: Add eventLog.ts + redFlags.ts (six rule_ids per appendix + peer_review_detected with supporting_event_ids=[]); citation unit test; final red-flag insert + complete status in one transaction (see §5)
