@@ -50,13 +50,19 @@ const UserProfileContext = createContext<UserProfileContextType | undefined>(
     undefined,
 );
 
-const API_KEY_PROVIDERS: ApiKeyProvider[] = ["claude", "gemini", "openai"];
+const API_KEY_PROVIDERS: ApiKeyProvider[] = [
+    "claude",
+    "gemini",
+    "openai",
+    "nvidia",
+];
 
 function emptyApiKeys(): ApiKeyState {
     return {
         claude: { configured: false, source: null },
         gemini: { configured: false, source: null },
         openai: { configured: false, source: null },
+        nvidia: { configured: false, source: null },
     };
 }
 
@@ -100,7 +106,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 creditsResetDate: futureResetDate.toISOString(),
                 creditsRemaining: 999999, // temporarily unlimited
                 tier: "Free",
-                tabularModel: "gemini-3-flash-preview",
+                tabularModel: "moonshotai/kimi-k2.6",
                 apiKeys: emptyApiKeys(),
             });
         } finally {

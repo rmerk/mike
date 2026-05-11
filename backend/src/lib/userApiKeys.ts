@@ -3,7 +3,7 @@ import { createServerSupabase } from "./supabase";
 import type { UserApiKeys } from "./llm";
 
 type Db = ReturnType<typeof createServerSupabase>;
-export type ApiKeyProvider = "claude" | "gemini" | "openai";
+export type ApiKeyProvider = "claude" | "gemini" | "openai" | "nvidia";
 export type ApiKeySource = "user" | "env" | null;
 export type ApiKeyStatus = Record<ApiKeyProvider, boolean> & {
     sources: Record<ApiKeyProvider, ApiKeySource>;
@@ -16,7 +16,15 @@ type EncryptedKeyRow = {
     auth_tag: string;
 };
 
-const PROVIDERS: ApiKeyProvider[] = ["claude", "gemini", "openai"];
+// NVIDIA is intentionally env-only (the user_api_keys.provider CHECK constraint
+// doesn't include it). It's included in the type + status reporting so the UI
+// can show NVIDIA-backed models as available, but saveUserApiKey will reject it.
+const PROVIDERS: ApiKeyProvider[] = ["claude", "gemini", "openai", "nvidia"];
+const USER_STORABLE_PROVIDERS = new Set<ApiKeyProvider>([
+    "claude",
+    "gemini",
+    "openai",
+]);
 
 function envApiKey(provider: ApiKeyProvider): string | null {
     if (provider === "claude") {
@@ -28,6 +36,9 @@ function envApiKey(provider: ApiKeyProvider): string | null {
     }
     if (provider === "openai") {
         return process.env.OPENAI_API_KEY?.trim() || null;
+    }
+    if (provider === "nvidia") {
+        return process.env.NVIDIA_API_KEY?.trim() || null;
     }
     return process.env.GEMINI_API_KEY?.trim() || null;
 }
@@ -99,10 +110,12 @@ export async function getUserApiKeyStatus(
         claude: false,
         gemini: false,
         openai: false,
+        nvidia: false,
         sources: {
             claude: null,
             gemini: null,
             openai: null,
+            nvidia: null,
         },
     };
 
@@ -138,6 +151,7 @@ export async function getUserApiKeys(
         claude: envApiKey("claude"),
         gemini: envApiKey("gemini"),
         openai: envApiKey("openai"),
+        nvidia: envApiKey("nvidia"),
     };
 
     const { data, error } = await db
@@ -162,6 +176,11 @@ export async function saveUserApiKey(
     value: string | null,
     db: Db = createServerSupabase(),
 ): Promise<void> {
+    if (!USER_STORABLE_PROVIDERS.has(provider)) {
+        throw new Error(
+            `Provider "${provider}" cannot be set per-user (env-only).`,
+        );
+    }
     const normalized = value?.trim() || null;
     if (!normalized) {
         const { error } = await db

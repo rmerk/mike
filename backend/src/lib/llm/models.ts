@@ -22,9 +22,20 @@ export const CLAUDE_LOW_MODELS = ["claude-haiku-4-5"] as const;
 export const GEMINI_LOW_MODELS = ["gemini-3.1-flash-lite-preview"] as const;
 export const OPENAI_LOW_MODELS = ["gpt-5.4-nano"] as const;
 
-export const DEFAULT_MAIN_MODEL = "gemini-3-flash-preview";
-export const DEFAULT_TITLE_MODEL = "gemini-3.1-flash-lite-preview";
-export const DEFAULT_TABULAR_MODEL = "gemini-3-flash-preview";
+// NVIDIA API Catalog (build.nvidia.com) — OpenAI-Chat-Completions-compatible
+// endpoint at integrate.api.nvidia.com. Model IDs use a `vendor/name` shape,
+// which is also how providerForModel distinguishes them from the others.
+export const NVIDIA_MAIN_MODELS = [
+    "moonshotai/kimi-k2.6",
+    "meta/llama-3.3-70b-instruct",
+    "deepseek-ai/deepseek-r1",
+] as const;
+export const NVIDIA_MID_MODELS = ["meta/llama-3.1-70b-instruct"] as const;
+export const NVIDIA_LOW_MODELS = ["meta/llama-3.1-8b-instruct"] as const;
+
+export const DEFAULT_MAIN_MODEL = "moonshotai/kimi-k2.6";
+export const DEFAULT_TITLE_MODEL = "moonshotai/kimi-k2.6";
+export const DEFAULT_TABULAR_MODEL = "moonshotai/kimi-k2.6";
 
 const ALL_MODELS = new Set<string>([
     ...CLAUDE_MAIN_MODELS,
@@ -36,6 +47,9 @@ const ALL_MODELS = new Set<string>([
     ...CLAUDE_LOW_MODELS,
     ...GEMINI_LOW_MODELS,
     ...OPENAI_LOW_MODELS,
+    ...NVIDIA_MAIN_MODELS,
+    ...NVIDIA_MID_MODELS,
+    ...NVIDIA_LOW_MODELS,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -46,6 +60,9 @@ export function providerForModel(model: string): Provider {
     if (model.startsWith("claude")) return "claude";
     if (model.startsWith("gemini")) return "gemini";
     if (model.startsWith("gpt-")) return "openai";
+    // NVIDIA catalog IDs all contain a `vendor/name` slash; the other
+    // providers' IDs never do.
+    if (model.includes("/")) return "nvidia";
     throw new Error(`Unknown model id: ${model}`);
 }
 
