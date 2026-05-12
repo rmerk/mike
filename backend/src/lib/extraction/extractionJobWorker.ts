@@ -17,10 +17,13 @@ const POLL_MS = (() => {
 // Orphaned-run reaper: an extraction that has been `running` for longer than
 // this is assumed dead (process recycle, OOM, container restart), so we flip
 // it to `failed` to release the partial unique index that otherwise blocks
-// retries. Default 20 minutes; override with EXTRACTION_RUN_TIMEOUT_MS.
+// retries. Default 2 hours — a legitimate 3K-page Epic-ebook extraction at
+// ~3–5s per page (Kimi vision) can take 2.5–4 hours, and the original 20-min
+// default was killing real runs before they could finish. Override with
+// EXTRACTION_RUN_TIMEOUT_MS (minimum 1 minute).
 const RUN_TIMEOUT_MS = (() => {
     const raw = process.env.EXTRACTION_RUN_TIMEOUT_MS?.trim();
-    const fallback = 20 * 60 * 1000;
+    const fallback = 4 * 60 * 60 * 1000; // 4 hours
     if (!raw) return fallback;
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) && n >= 60 * 1000 ? n : fallback;

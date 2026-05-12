@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-    completeClaudeMedMalExtractionPage: vi.fn(),
+    completeMedMalExtractionPage: vi.fn(),
     uploadFile: vi.fn(async () => undefined),
     renderPageToPngBuffer: vi.fn(async (_pdf: unknown, n: number) => ({
         png: Buffer.from(`png-page-${n}`),
@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../llm", () => ({
-    completeClaudeMedMalExtractionPage: mocks.completeClaudeMedMalExtractionPage,
+    completeMedMalExtractionPage: mocks.completeMedMalExtractionPage,
 }));
 
 vi.mock("../storage", () => ({
@@ -33,7 +33,7 @@ import { visionPrescanPeerReviewMarkers } from "./peerReviewVisionPrescan";
 
 describe("visionPrescanPeerReviewMarkers", () => {
     beforeEach(() => {
-        mocks.completeClaudeMedMalExtractionPage.mockReset();
+        mocks.completeMedMalExtractionPage.mockReset();
         mocks.uploadFile.mockReset();
         mocks.uploadFile.mockResolvedValue(undefined);
         mocks.renderPageToPngBuffer.mockClear();
@@ -52,11 +52,11 @@ describe("visionPrescanPeerReviewMarkers", () => {
         });
         expect(result.markerPages).toEqual([]);
         expect(result.rasterCache.size).toBe(0);
-        expect(mocks.completeClaudeMedMalExtractionPage).not.toHaveBeenCalled();
+        expect(mocks.completeMedMalExtractionPage).not.toHaveBeenCalled();
     });
 
     it("flags pages where vision detects a peer-review marker and caches rasters", async () => {
-        mocks.completeClaudeMedMalExtractionPage.mockImplementation(
+        mocks.completeMedMalExtractionPage.mockImplementation(
             async ({ userContent }: { userContent: string }) => {
                 const m = userContent.match(/Page number: (\d+)/);
                 const page = m ? Number(m[1]) : 0;
@@ -95,7 +95,7 @@ describe("visionPrescanPeerReviewMarkers", () => {
     });
 
     it("embeds the canonical PEER_REVIEW_MARKERS list in the system prompt", async () => {
-        mocks.completeClaudeMedMalExtractionPage.mockResolvedValueOnce(
+        mocks.completeMedMalExtractionPage.mockResolvedValueOnce(
             JSON.stringify({
                 has_peer_review_markers: false,
                 matched_phrase: null,
@@ -113,7 +113,7 @@ describe("visionPrescanPeerReviewMarkers", () => {
             storageEnabled: true,
         });
 
-        const call = mocks.completeClaudeMedMalExtractionPage.mock.calls[0]![0];
+        const call = mocks.completeMedMalExtractionPage.mock.calls[0]![0];
         const prompt = (call as { systemPrompt: string }).systemPrompt;
         for (const marker of PEER_REVIEW_MARKERS) {
             expect(prompt).toContain(marker);
@@ -121,7 +121,7 @@ describe("visionPrescanPeerReviewMarkers", () => {
     });
 
     it("retries on invalid JSON output and eventually throws if unrecoverable", async () => {
-        mocks.completeClaudeMedMalExtractionPage.mockResolvedValue(
+        mocks.completeMedMalExtractionPage.mockResolvedValue(
             "not json at all",
         );
         await expect(
@@ -137,13 +137,13 @@ describe("visionPrescanPeerReviewMarkers", () => {
             }),
         ).rejects.toThrow(/peer-review vision prescan failed/);
         // 1 initial + 2 repair attempts
-        expect(mocks.completeClaudeMedMalExtractionPage).toHaveBeenCalledTimes(
+        expect(mocks.completeMedMalExtractionPage).toHaveBeenCalledTimes(
             3,
         );
     });
 
     it("skips R2 upload when storage is disabled", async () => {
-        mocks.completeClaudeMedMalExtractionPage.mockResolvedValueOnce(
+        mocks.completeMedMalExtractionPage.mockResolvedValueOnce(
             JSON.stringify({
                 has_peer_review_markers: false,
                 matched_phrase: null,

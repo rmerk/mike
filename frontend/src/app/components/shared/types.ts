@@ -358,6 +358,35 @@ export interface MedMalSourceBbox {
   h: number;
 }
 
+// Mulder-rule medication shape — mirrors the backend MedicationEntry coerced
+// from LLM output in backend/src/lib/extraction/eventLog.ts. All fields except
+// `name` are optional/nullable because the chart entry often omits them.
+export interface MedMalMedicationEntry {
+  name: string;
+  dose?: string | null;
+  route?: string | null;
+  frequency?: string | null;
+  ordered_by?: string | null;
+  administered_by?: string | null;
+  ordered_at?: string | null;
+  administered_at?: string | null;
+  indication?: string | null;
+  allergy_conflict_flag?: boolean | null;
+  weight_based_dose_check_passed?: boolean | null;
+}
+
+// Vitals shape — mirrors the backend VitalsEntry. `bp` is "systolic/diastolic"
+// as a string; everything else numeric. All fields nullable.
+export interface MedMalVitalsEntry {
+  bp?: string | null;
+  hr?: number | null;
+  rr?: number | null;
+  spo2?: number | null;
+  temp_c?: number | null;
+  map?: number | null;
+  urine_output_ml?: number | null;
+}
+
 export interface MedMalDocumentEvent {
   id: string;
   document_id: string;
@@ -374,6 +403,8 @@ export interface MedMalDocumentEvent {
   episode_of_care?: string | null;
   privacy_class?: string;
   key_date_role?: string | null;
+  medications?: MedMalMedicationEntry[] | null;
+  vitals?: MedMalVitalsEntry | null;
 }
 
 export type MedMalRedFlagSeverity = "low" | "medium" | "high";

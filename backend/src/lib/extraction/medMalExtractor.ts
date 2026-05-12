@@ -5,9 +5,9 @@ import {
     extractionPageRasterKey,
     storageEnabled,
 } from "../storage";
-import { completeClaudeMedMalExtractionPage } from "../llm";
+import { completeMedMalExtractionPage } from "../llm";
 import { providerForModel } from "../llm/models";
-import type { UserApiKeys } from "../llm/types";
+import type { Provider, UserApiKeys } from "../llm/types";
 import type { createServerSupabase } from "../supabase";
 import { textContainsPeerReviewMarker } from "./peerReviewMarkers";
 import {
@@ -21,6 +21,8 @@ import {
 import {
     coerceEncounterType,
     coerceLlmPrivacyClass,
+    coerceMedications,
+    coerceVitals,
     insertDocumentEvents,
     type DocumentEventInsert,
 } from "./eventLog";
@@ -32,17 +34,25 @@ import { runDeterministicRedFlags, type DocumentEventRow } from "./redFlags";
 
 type Db = ReturnType<typeof createServerSupabase>;
 
-// Vision/image input goes through the Anthropic-specific page extractor, so
-// non-Claude models cannot satisfy the contract. Validate at boot and again at
-// run-start (route handler) so a misconfigured env fails fast, not mid-run.
-const DEFAULT_EXTRACTION_MODEL = "claude-sonnet-4-6";
+// Vision/image input is currently implemented for the Claude (Anthropic
+// `messages` with image content blocks) and NVIDIA (OpenAI-compatible chat
+// completions with `image_url` content blocks; Kimi K2.5/K2.6 VLM and
+// Llama-3.2 Vision) providers. Validate at boot and again at run-start (route
+// handler) so a misconfigured env fails fast, not mid-run.
+const DEFAULT_EXTRACTION_MODEL = "moonshotai/kimi-k2.6";
+
+const VISION_CAPABLE_PROVIDERS: ReadonlySet<Provider> = new Set([
+    "claude",
+    "nvidia",
+]);
 
 export function resolveExtractionModel(): string {
     const configured = process.env.MED_MAL_EXTRACTION_MODEL?.trim();
     const model = configured || DEFAULT_EXTRACTION_MODEL;
-    if (providerForModel(model) !== "claude") {
+    const provider = providerForModel(model);
+    if (!VISION_CAPABLE_PROVIDERS.has(provider)) {
         throw new Error(
-            `MED_MAL_EXTRACTION_MODEL must be a Claude model (vision required). Got: ${model}`,
+            `MED_MAL_EXTRACTION_MODEL must be a vision-capable model (Claude or NVIDIA Kimi VLM). Got: ${model} (provider: ${provider}).`,
         );
     }
     return model;
@@ -54,9 +64,41 @@ const EXTRACTION_MODEL = resolveExtractionModel();
 // JSON glitches without burning tokens on persistently broken responses.
 const MAX_JSON_REPAIR_ATTEMPTS = 2;
 
+// Main loop concurrency. Default 8 — empirically the right knob to bring a
+// 3K-page run from days to hours on NIM Kimi K2.6. Each parallel slot is a
+// fully independent per-page extraction; the existing per-page hard-fail
+// semantics are preserved (the whole batch aborts on any one page failure).
+// Override with MED_MAL_MAIN_LOOP_CONCURRENCY.
+const MAIN_LOOP_CONCURRENCY = (() => {
+    const raw = process.env.MED_MAL_MAIN_LOOP_CONCURRENCY?.trim();
+    const fallback = 8;
+    if (!raw) return fallback;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 1 && n <= 32 ? n : fallback;
+})();
+
+// Decode budget per page. Was 8192 — wasteful when most pages emit <1K tokens
+// of JSON. 4096 halves decode wallclock on long generations while leaving
+// headroom for dense pages.
+const PAGE_MAX_OUTPUT_TOKENS = 4096;
+
+// Truncate page text before sending to the LLM. Most clinical pages fit in
+// 40K chars (~10K tokens); above that is usually decorative repetition,
+// footers, or column overflow that hurts more than it helps. Saves both
+// upload time and prefill tokens on big-prompt models.
+const PAGE_TEXT_CHAR_CAP = 40000;
+
 const SYSTEM_PROMPT = `You extract structured clinical timeline events from ONE page of a medical record PDF.
 Return ONLY valid JSON (no markdown fences) with this exact shape:
 {"events":[{"event_date":null,"event_time":null,"event_date_text":null,"provider":null,"provider_role":null,"episode_of_care":null,"encounter_type":"admission"|"ed"|"clinic"|"lab"|"imaging"|"op"|"nursing"|"note"|null,"privacy_class":"standard","key_date_role":null,"dx_codes":null,"medications":null,"vitals":null,"procedures":null,"narrative":"string max 500 chars","source_page":NUMBER,"source_bbox":{"x":number,"y":number,"w":number,"h":number}}]}
+medications: when the page records medication orders or administrations, emit an array of objects with this shape (omit fields that are not in the chart entry — use null, not invented values):
+  [{"name":"drug name (generic preferred)","dose":"e.g. 5000 units","route":"IV|IV push|IV infusion|PO|IM|SC|PR|inhaled|topical|NG|other","frequency":"e.g. q6h","ordered_by":"provider name","administered_by":"RN name","ordered_at":"ISO 8601 timestamp or HH:MM","administered_at":"ISO 8601 timestamp or HH:MM","indication":"clinical reason","allergy_conflict_flag":boolean|null,"weight_based_dose_check_passed":boolean|null}]
+  - "name" is required for every entry. If you cannot identify a drug name, omit the entry.
+  - Use null for any subfield the chart does not state. Do NOT fabricate dosing, routes, providers, or timestamps.
+vitals: when the page records vital signs, emit a single object (not array) capturing what's documented for that encounter:
+  {"bp":"systolic/diastolic e.g. 120/80","hr":number,"rr":number,"spo2":number,"temp_c":number,"map":number,"urine_output_ml":number}
+  - Use null for any field that is not in the chart.
+  - bp is always a string; the rest are numbers.
 Rules:
 - Every event MUST have source_page equal to the page number given in the user message.
 - source_bbox must be tight around the cited region in PDF user space units (same origin as pdf.js text positions; origin bottom-left).
@@ -86,7 +128,9 @@ export type NormalizeDropReason =
     | "wrong_source_page"
     | "missing_bbox"
     | "non_finite_bbox"
-    | "zero_area_bbox";
+    | "zero_area_bbox"
+    | "malformed_medications"
+    | "malformed_vitals";
 
 export type NormalizeResult = {
     events: DocumentEventInsert[];
@@ -111,6 +155,8 @@ function normalizeLlmEvents(
         missing_bbox: 0,
         non_finite_bbox: 0,
         zero_area_bbox: 0,
+        malformed_medications: 0,
+        malformed_vitals: 0,
     };
     const out: DocumentEventInsert[] = [];
     if (!parsed || typeof parsed !== "object") return { events: out, dropped };
@@ -161,8 +207,22 @@ function normalizeLlmEvents(
             dx_codes: Array.isArray(o.dx_codes)
                 ? (o.dx_codes as string[])
                 : null,
-            medications: o.medications ?? null,
-            vitals: o.vitals ?? null,
+            medications: (() => {
+                if (o.medications == null) return null;
+                const coerced = coerceMedications(o.medications);
+                if (coerced === null && o.medications !== null) {
+                    dropped.malformed_medications++;
+                }
+                return coerced;
+            })(),
+            vitals: (() => {
+                if (o.vitals == null) return null;
+                const coerced = coerceVitals(o.vitals);
+                if (coerced === null && o.vitals !== null) {
+                    dropped.malformed_vitals++;
+                }
+                return coerced;
+            })(),
             procedures: Array.isArray(o.procedures)
                 ? (o.procedures as string[])
                 : null,
@@ -183,7 +243,9 @@ function hasAnyDrops(dropped: Record<NormalizeDropReason, number>): boolean {
         dropped.wrong_source_page > 0 ||
         dropped.missing_bbox > 0 ||
         dropped.non_finite_bbox > 0 ||
-        dropped.zero_area_bbox > 0
+        dropped.zero_area_bbox > 0 ||
+        dropped.malformed_medications > 0 ||
+        dropped.malformed_vitals > 0
     );
 }
 
@@ -254,6 +316,12 @@ export async function executeMedMalExtraction(params: {
             return { ok: false, error: "PDF has zero pages" };
         }
         await bumpSeq(db, runId, { pages_total: numPages, pages_complete: 0 });
+        console.info("[extraction/run] pdf loaded", {
+            runId,
+            documentId,
+            numPages,
+            model: EXTRACTION_MODEL,
+        });
 
         // Phase 1 prescan: text-layer peer-review marker scan (fast path for
         // digital PDFs). Phase 2 prescan: vision-based scan over pages whose
@@ -262,6 +330,7 @@ export async function executeMedMalExtraction(params: {
         // cannot be bypassed by a scanned page mid-document.
         const peerPages: number[] = [];
         const visionCandidates: number[] = [];
+        const textLayerStart = Date.now();
         for (let p = 1; p <= numPages; p++) {
             const items = await getPageItems(pdf, p);
             const plain = itemsToPlainText(items);
@@ -271,6 +340,13 @@ export async function executeMedMalExtraction(params: {
                 visionCandidates.push(p);
             }
         }
+        console.info("[extraction/run] text-layer scan complete", {
+            runId,
+            numPages,
+            peerPages: peerPages.length,
+            visionCandidates: visionCandidates.length,
+            elapsedMs: Date.now() - textLayerStart,
+        });
         let visionRasterCache = new Map<number, RasterCacheEntry>();
         if (visionCandidates.length > 0 && peerPages.length === 0) {
             // Skip the vision prescan if a text-layer hit already mandates a
@@ -285,6 +361,12 @@ export async function executeMedMalExtraction(params: {
                 });
                 return { ok: false, error: errMsg };
             }
+            console.info("[extraction/run] vision prescan starting", {
+                runId,
+                pages: visionCandidates.length,
+                model: EXTRACTION_MODEL,
+            });
+            const prescanStart = Date.now();
             try {
                 const prescan = await visionPrescanPeerReviewMarkers({
                     pdf,
@@ -295,6 +377,12 @@ export async function executeMedMalExtraction(params: {
                     model: EXTRACTION_MODEL,
                     apiKeys,
                     storageEnabled,
+                });
+                console.info("[extraction/run] vision prescan complete", {
+                    runId,
+                    pages: visionCandidates.length,
+                    elapsedMs: Date.now() - prescanStart,
+                    markerPages: prescan.markerPages.length,
                 });
                 for (const entry of prescan.rasterCache.values()) {
                     allRasterKeys.add(entry.rasterKey);
@@ -352,7 +440,17 @@ export async function executeMedMalExtraction(params: {
             return { ok: false, error: errMsg };
         }
 
-        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+        // Per-page extraction. Returns ok+events on success; ok:false on
+        // fatal failure (caller aborts the whole run). Pages are processed
+        // in parallel batches of MAIN_LOOP_CONCURRENCY so a 3K-page run that
+        // would take days serially completes in hours. All shared mutable
+        // state (allRasterKeys) is only mutated via methods that are safe
+        // for concurrent adds; pdfjs page handles are read-only.
+        type PageResult =
+            | { ok: true; pageNum: number; events: DocumentEventInsert[] }
+            | { ok: false; pageNum: number; errMsg: string };
+
+        async function processPage(pageNum: number): Promise<PageResult> {
             const page = await pdf.getPage(pageNum);
             const viewport = page.getViewport({ scale: 1.0 });
             const items = await getPageItems(pdf, pageNum);
@@ -361,19 +459,14 @@ export async function executeMedMalExtraction(params: {
 
             if (needsRaster) {
                 if (!storageEnabled) {
-                    const errMsg =
-                        "Scanned page requires object storage (R2) for vision extraction.";
-                    await bumpSeq(db, runId, {
-                        status: "failed",
-                        error: `${errMsg} (page ${pageNum})`,
-                        pages_complete: pageNum - 1,
-                        completed_at: new Date().toISOString(),
-                    });
-                    return { ok: false, error: errMsg };
+                    return {
+                        ok: false,
+                        pageNum,
+                        errMsg: `Page ${pageNum}: scanned page requires object storage (R2) for vision extraction.`,
+                    };
                 }
                 const cached = visionRasterCache.get(pageNum);
                 if (cached) {
-                    // Reuse the raster the prescan already rendered + uploaded.
                     visionB64 = cached.pngBase64;
                 } else {
                     try {
@@ -399,14 +492,11 @@ export async function executeMedMalExtraction(params: {
                         allRasterKeys.add(rasterKey);
                     } catch (e) {
                         const msg = e instanceof Error ? e.message : String(e);
-                        const errMsg = `Page ${pageNum}: raster/vision failed: ${msg.slice(0, 500)}`;
-                        await bumpSeq(db, runId, {
-                            status: "failed",
-                            error: errMsg,
-                            pages_complete: pageNum - 1,
-                            completed_at: new Date().toISOString(),
-                        });
-                        return { ok: false, error: errMsg };
+                        return {
+                            ok: false,
+                            pageNum,
+                            errMsg: `Page ${pageNum}: raster/vision failed: ${msg.slice(0, 500)}`,
+                        };
                     }
                 }
             }
@@ -414,7 +504,7 @@ export async function executeMedMalExtraction(params: {
             const pageText = itemsToPlainText(items);
             const userContent = needsRaster
                 ? `Page number: ${pageNum}\nPage width (PDF user space): ${viewport.width}\nPage height (PDF user space): ${viewport.height}\n\nA PNG of this page is attached (downscaled if large). Extract events; source_bbox values must be PDF user space coordinates for this width and height.`
-                : `Page number: ${pageNum}\nPage width: ${viewport.width}\nPage height: ${viewport.height}\n\nPage text (may be incomplete if scanned):\n${pageText.slice(0, 120000)}`;
+                : `Page number: ${pageNum}\nPage width: ${viewport.width}\nPage height: ${viewport.height}\n\nPage text (may be incomplete if scanned):\n${pageText.slice(0, PAGE_TEXT_CHAR_CAP)}`;
 
             let lastErr: Error | null = null;
             let toInsert: DocumentEventInsert[] = [];
@@ -427,12 +517,12 @@ export async function executeMedMalExtraction(params: {
                     attempt > 0
                         ? `\nYour previous output was invalid JSON. Emit ONLY the JSON object, no prose. Attempt ${attempt + 1}.`
                         : "";
-                const rawText = await completeClaudeMedMalExtractionPage({
+                const rawText = await completeMedMalExtractionPage({
                     model: EXTRACTION_MODEL,
                     systemPrompt: SYSTEM_PROMPT + repair,
                     userContent,
                     visionPngBase64: visionB64,
-                    maxTokens: 8192,
+                    maxTokens: PAGE_MAX_OUTPUT_TOKENS,
                     apiKeys,
                 });
                 if (!rawText.trim()) {
@@ -468,32 +558,82 @@ export async function executeMedMalExtraction(params: {
                 }
             }
             if (lastErr) {
-                const errMsg = `Page ${pageNum}: ${lastErr.message}`;
+                return {
+                    ok: false,
+                    pageNum,
+                    errMsg: `Page ${pageNum}: ${lastErr.message}`,
+                };
+            }
+            return { ok: true, pageNum, events: toInsert };
+        }
+
+        let completed = 0;
+        for (
+            let batchStart = 1;
+            batchStart <= numPages;
+            batchStart += MAIN_LOOP_CONCURRENCY
+        ) {
+            const batchEnd = Math.min(
+                batchStart + MAIN_LOOP_CONCURRENCY - 1,
+                numPages,
+            );
+            const tasks: Promise<PageResult>[] = [];
+            for (let p = batchStart; p <= batchEnd; p++) {
+                tasks.push(processPage(p));
+            }
+            const results = await Promise.all(tasks);
+            // Sort by page number so persistence + log ordering is predictable
+            // (Promise.all preserves array order already, but be explicit).
+            results.sort((a, b) => a.pageNum - b.pageNum);
+
+            const failure = results.find((r) => !r.ok);
+            if (failure && !failure.ok) {
                 await bumpSeq(db, runId, {
                     status: "failed",
-                    error: errMsg,
-                    pages_complete: pageNum - 1,
+                    error: failure.errMsg,
+                    pages_complete: completed,
                     completed_at: new Date().toISOString(),
                 });
-                return { ok: false, error: errMsg };
+                return { ok: false, error: failure.errMsg };
             }
-            if (toInsert.length) {
+
+            // Persist events for each successfully-extracted page. Per-page
+            // insert (not batched across pages) keeps citation rows scoped
+            // to their source page in case a later DB error happens —
+            // partial-on-disk is preferable to all-or-nothing for a
+            // multi-hour run.
+            for (const r of results) {
+                if (!r.ok) continue; // unreachable due to failure check
+                if (r.events.length === 0) continue;
                 try {
-                    await insertDocumentEvents(db, toInsert);
+                    await insertDocumentEvents(db, r.events);
                 } catch (e) {
-                    // Per-page persistence failures (bad citation, DB
-                    // error) must not abort the whole run after partial
-                    // pages already landed. Log and continue with the
-                    // next page.
                     const msg = e instanceof Error ? e.message : String(e);
                     console.error("[extraction/insertDocumentEvents]", {
                         runId,
-                        pageNum,
+                        pageNum: r.pageNum,
                         error: msg,
                     });
                 }
             }
-            await bumpSeq(db, runId, { pages_complete: pageNum });
+
+            completed += results.length;
+            await bumpSeq(db, runId, { pages_complete: completed });
+            // Periodic progress log: at the end of each batch + headline
+            // milestones. Avoids spamming the console once concurrency is
+            // high (8 pages per batch × 3075 / 8 = 384 batches).
+            const passedMilestone =
+                completed === results.length || // first batch
+                Math.floor(completed / 25) >
+                    Math.floor((completed - results.length) / 25) ||
+                completed === numPages;
+            if (passedMilestone) {
+                console.info("[extraction/run] page complete", {
+                    runId,
+                    completed,
+                    numPages,
+                });
+            }
         }
 
         const { data: eventRows } = await db

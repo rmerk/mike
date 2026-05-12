@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
     downloadFile: vi.fn(),
-    completeClaudeMedMalExtractionPage: vi.fn(),
+    completeMedMalExtractionPage: vi.fn(),
     insertDocumentEvents: vi.fn(async () => undefined),
 }));
 
@@ -15,7 +15,7 @@ vi.mock("../storage", () => ({
 }));
 
 vi.mock("../llm", () => ({
-    completeClaudeMedMalExtractionPage: mocks.completeClaudeMedMalExtractionPage,
+    completeMedMalExtractionPage: mocks.completeMedMalExtractionPage,
 }));
 
 vi.mock("../llm/models", () => ({
@@ -77,7 +77,7 @@ function rpcDb() {
 describe("malformed PDF handling", () => {
     beforeEach(() => {
         mocks.downloadFile.mockReset();
-        mocks.completeClaudeMedMalExtractionPage.mockReset();
+        mocks.completeMedMalExtractionPage.mockReset();
     });
 
     it("loadPdfFromBuffer rejects malformed bytes", async () => {
@@ -106,7 +106,7 @@ describe("malformed PDF handling", () => {
 
         // No event-extraction call may happen.
         expect(
-            mocks.completeClaudeMedMalExtractionPage,
+            mocks.completeMedMalExtractionPage,
         ).not.toHaveBeenCalled();
 
         // A terminal failed patch must record the error.

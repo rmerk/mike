@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-    completeClaudeMedMalExtractionPage: vi.fn(),
+    completeMedMalExtractionPage: vi.fn(),
     insertDocumentEvents: vi.fn(async () => undefined),
     visionPrescanPeerReviewMarkers: vi.fn(async () => ({
         markerPages: [] as number[],
@@ -22,13 +22,19 @@ vi.mock("../storage", () => ({
 }));
 
 vi.mock("../llm", () => ({
-    completeClaudeMedMalExtractionPage:
-        mocks.completeClaudeMedMalExtractionPage,
+    completeMedMalExtractionPage: mocks.completeMedMalExtractionPage,
 }));
 
 vi.mock("../llm/models", () => ({
+    // Mirror the real `providerForModel` shape closely enough for the
+    // extraction gate: Claude prefix → claude, vendor/name → nvidia,
+    // anything else → gemini (which the gate rejects).
     providerForModel: (model: string) =>
-        model.startsWith("claude") ? "claude" : "gemini",
+        model.startsWith("claude")
+            ? "claude"
+            : model.includes("/")
+              ? "nvidia"
+              : "gemini",
 }));
 
 vi.mock("./pdfRegions", () => ({
@@ -69,7 +75,7 @@ vi.mock("./eventLog", async () => {
 });
 
 const {
-    completeClaudeMedMalExtractionPage,
+    completeMedMalExtractionPage,
     insertDocumentEvents,
     visionPrescanPeerReviewMarkers,
 } = mocks;
@@ -123,7 +129,7 @@ import { executeMedMalExtraction } from "./medMalExtractor";
 
 describe("executeMedMalExtraction peer-review gate", () => {
     beforeEach(() => {
-        completeClaudeMedMalExtractionPage.mockReset();
+        completeMedMalExtractionPage.mockReset();
         insertDocumentEvents.mockReset();
         visionPrescanPeerReviewMarkers.mockReset();
         visionPrescanPeerReviewMarkers.mockResolvedValue({
@@ -159,7 +165,7 @@ describe("executeMedMalExtraction peer-review gate", () => {
             error: expect.stringContaining("Minn. Stat. 145.64"),
         });
         // Claude must never be invoked when the gate triggers.
-        expect(completeClaudeMedMalExtractionPage).not.toHaveBeenCalled();
+        expect(completeMedMalExtractionPage).not.toHaveBeenCalled();
         // A peer-review red-flag row must be inserted.
         const flagInsert = fromCalls.find(
             (c) => c.table === "document_red_flags" && c.insert !== undefined,
@@ -194,7 +200,7 @@ describe("executeMedMalExtraction peer-review gate", () => {
 
     it("returns ok and inserts events when no peer-review marker is present", async () => {
         setPageTexts(["Routine clinic visit; HR 80, BP 120/80."]);
-        completeClaudeMedMalExtractionPage.mockResolvedValueOnce(
+        completeMedMalExtractionPage.mockResolvedValueOnce(
             JSON.stringify({
                 events: [
                     {
@@ -223,7 +229,7 @@ describe("executeMedMalExtraction peer-review gate", () => {
         });
 
         expect(result).toEqual({ ok: true });
-        expect(completeClaudeMedMalExtractionPage).toHaveBeenCalledTimes(1);
+        expect(completeMedMalExtractionPage).toHaveBeenCalledTimes(1);
         expect(insertDocumentEvents).toHaveBeenCalledTimes(1);
         const inserted = insertDocumentEvents.mock.calls[0][1] as Array<{
             encounter_type: string;
@@ -268,7 +274,7 @@ describe("executeMedMalExtraction peer-review gate", () => {
         };
         expect(prescanArgs.pageNums).toEqual([2]);
         // No event-extraction call may happen once the gate triggers.
-        expect(completeClaudeMedMalExtractionPage).not.toHaveBeenCalled();
+        expect(completeMedMalExtractionPage).not.toHaveBeenCalled();
         // A peer-review red-flag row must reference the vision-detected page.
         const flagInsert = fromCalls.find(
             (c) => c.table === "document_red_flags" && c.insert !== undefined,
@@ -284,7 +290,7 @@ describe("executeMedMalExtraction peer-review gate", () => {
 
     it("coerces peer_review_145_64 from model output to 'standard'", async () => {
         setPageTexts(["Some note text"]);
-        completeClaudeMedMalExtractionPage.mockResolvedValueOnce(
+        completeMedMalExtractionPage.mockResolvedValueOnce(
             JSON.stringify({
                 events: [
                     {

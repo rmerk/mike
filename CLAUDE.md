@@ -80,6 +80,20 @@ See `README.md` for the full env-var list. Two backend secrets aren't obvious fr
 - `DOWNLOAD_SIGNING_SECRET` — HMAC key for the persistent download-link tokens.
 - `USER_API_KEYS_ENCRYPTION_SECRET` — AES-GCM key used to encrypt user-supplied provider API keys at rest.
 
+### Med-mal extraction model
+
+`MED_MAL_EXTRACTION_MODEL` selects which vision-capable model handles per-page extraction + the § 145.64 peer-review prescan. Default is `moonshotai/kimi-k2.6` (NVIDIA API Catalog Kimi K2.6 VLM via `NVIDIA_API_KEY`). Acceptable providers are `claude` (any Claude vision model, e.g. `claude-sonnet-4-6`, requires `ANTHROPIC_API_KEY`) and `nvidia` (Kimi K2.5/K2.6 or another vision-capable model on the NVIDIA Catalog). Other providers (gemini, openai) are rejected at boot — they don't have an image-input wiring in `backend/src/lib/llm/`. The dispatcher lives in `backend/src/lib/llm/index.ts` (`completeMedMalExtractionPage`).
+
+### Extraction tuning knobs
+
+For multi-hour runs against large Epic ebooks, these env vars are worth knowing:
+
+- `MED_MAL_MAIN_LOOP_CONCURRENCY` (default `8`, range `1–32`) — parallel per-page extraction calls in the main loop. The single biggest throughput knob: serial runs on a 3K-page PDF can take days; with concurrency 8 they finish in hours. Per-page hard-fail semantics are preserved (one page failure aborts the batch).
+- `MED_MAL_PRESCAN_CONCURRENCY` (default `8`, range `1–32`) — parallel § 145.64 vision-prescan calls. Lower if the provider rate-limits.
+- `NVIDIA_MAX_RETRIES` (default `3`, range `0–10`) — retry budget for transient NIM errors (408, 429, 5xx, network blips). Auth/4xx errors fail fast.
+- `EXTRACTION_RUN_TIMEOUT_MS` (default `14400000` = 4h, minimum `60000`) — reaper threshold for `running` rows. A 3K-page Epic run can take 2.5–4 hours; the original 20-min default killed legitimate long runs.
+- `EXTRACTION_ASYNC_MODE` (default inline / `setImmediate`) — set to `queue` to claim jobs via the `extraction_async_jobs` DB queue with FOR UPDATE SKIP LOCKED. Use in multi-instance deployments.
+
 ## Gotchas
 
 - Frontend deploys to Cloudflare Workers via OpenNext — Node-only APIs in server code (e.g. raw `fs`, native bindings) can break the build.

@@ -24,8 +24,11 @@ Five phases, ordered to de-risk the biggest investment (extraction pipeline) by 
 |---|---|---|---|---|
 | 0 | Validate extraction-pipeline plan against MN-law research | "Plan deltas" appendix + Cited authority section in `PLAN_med_mal_extraction_pipeline.md` | 1–2 hrs | ✅ shipped (`3a97315`) |
 | 1 | Ship templates feature | Working template picker + recommended-reviews strip; `projects.template_id` migration | ~half day | ✅ shipped (`73faac0`) |
-| 2 | Build extraction pipeline | Event-log pipeline running against a real Epic PDF; bbox-anchored citations; 6 red-flag rules | multi-day | ⏳ pending |
-| 3 | Integrate templates ↔ extraction | "+ Medical Chronology" populates from `document_events` rather than re-extracting | ~half day | ⏳ pending |
+| 2 | Build extraction pipeline | Event-log pipeline running against a real Epic PDF; bbox-anchored citations; 6 red-flag rules | multi-day | ✅ shipped (`58f5766`, PR #2) |
+| 3 | Integrate templates ↔ extraction (MVP: Medical Chronology Timeline view) | "+ Medical Chronology" routes to `/timeline/[docId]` reading `document_events` | ~half day | ✅ shipped (`ddee141`, PR #3) |
+| 3.5a | MAR + Vitals lenses (Timeline-style views over event log) | "+ MAR" and "+ Vitals Trend" route to `/mar/[docId]` and `/vitals/[docId]`; medications + vitals JSON shapes locked in extractor prompt | ~half day | ⏳ in progress (this PR) |
+| 3.5b | Labs lens | `labs jsonb` column + prompt extension + `/labs/[docId]` view | ~half day | ⏳ pending |
+| 3.5c | Bills lens | Likely new `document_charges` table (per-line-item cardinality); prompt extension + `/bills/[docId]` view | ~half day | ⏳ pending |
 | 4 | v1.1 deadline tracking | `projects.key_dates jsonb` + project-page widget with auto-suggest from event log | ~half day | ⏳ pending |
 
 ## Hidden dependencies surfaced during exploration
@@ -33,7 +36,7 @@ Five phases, ordered to de-risk the biggest investment (extraction pipeline) by 
 Surfaced from a read-through of the codebase before phasing began. These are NOT in the per-phase plans and are critical to the overall arc:
 
 1. **`backend/migrations/` directory did not exist.** Phase 1 created it (`0001_projects_template_id.sql`) — the workflow is now established for Phase 2 and beyond.
-2. **LLM provider layer does not support multimodal input.** `backend/src/lib/llm/claude.ts` and `gemini.ts` both accept text-only content. Phase 2 must extend the provider abstraction (signatures in `backend/src/lib/llm/index.ts`) for image/PDF parts. This is a sub-task hidden inside Phase 2's "page-by-page multimodal extraction" step — not a free addition to the multi-day estimate.
+2. **LLM provider layer does not support multimodal input.** `backend/src/lib/llm/claude.ts` and `gemini.ts` both accept text-only content. Phase 2 must extend the provider abstraction (signatures in `backend/src/lib/llm/index.ts`) for image/PDF parts. This is a sub-task hidden inside Phase 2's "page-by-page multimodal extraction" step — not a free addition to the multi-day estimate. **Resolved in two steps:** Phase 2 shipped Claude vision (`completeClaudeMedMalExtractionPage` in `claude.ts`). A Phase 2 follow-up generalized that to a provider-dispatching `completeMedMalExtractionPage` and added NVIDIA Catalog vision (`completeNvidiaMedMalExtractionPage` for Kimi K2.5/K2.6 VLM via OpenAI-compatible `image_url` content blocks). Default extraction model is now `moonshotai/kimi-k2.6` to align with the project's chat default and cut Anthropic-vision cost.
 3. **No bbox-extraction primitive exists.** Existing PDF code (`backend/src/lib/convert.ts` + `pdfjs-dist` usage in `routes/projects.ts:754–765`) only counts pages and walks the outline. Phase 2 must build a per-page rendering + bbox-anchoring primitive. Decision point: pdfjs-dist text-layer-with-positions (cheap, works for typed text; fails on scanned/handwritten Epic content) vs. rasterize + LLM-returned bboxes (expensive but works on handwriting — the actual case for Epic ebooks).
 4. **Supabase branching is gated on the Pro plan.** The current org (`rmmain-2176's projects`) is on the free plan; `create_branch` returns `PaymentRequiredException`. Until the plan is upgraded, schema migrations apply directly to prod via `mcp__supabase__apply_migration`. Documented in `CLAUDE.md` so future migrations don't burn round-trips on `create_branch` first. Prefer reversible changes (additive nullable columns with `if not exists`) so a bad migration can be rolled back without data loss.
 
@@ -88,6 +91,33 @@ Critical files:
 - `frontend/src/app/components/projects/ProjectPage.tsx` — strip detects extracted-document state and adds a "Populate from event log" path.
 
 Verification gate: opening "+ Medical Chronology" on a fully-extracted document takes < 2 s (no LLM call); same operation on a non-extracted document falls back to existing extraction.
+
+## Phase 3.5 — MAR + Vitals lenses, then Labs, then Bills
+
+Phase 3's MVP shipped only the chronology Timeline. Phase 3.5 generalizes the same shape — `document_events` read on the right, `DocView` PDF preview on the left, row-click bbox highlight — to four additional lenses (MAR, Vitals, Labs, Bills). Split into three sub-phases because the data-readiness asymmetry the roadmap originally missed:
+
+| Lens | Column on `document_events` today? | Extractor prompt enforces shape? |
+|---|---|---|
+| MAR | ✅ `medications jsonb` (already present, shape now locked in 3.5a) | ✅ as of 3.5a |
+| Vitals | ✅ `vitals jsonb` (same) | ✅ as of 3.5a |
+| Labs | ❌ no column | ❌ |
+| Bills | ❌ no column; line-item cardinality probably needs a separate table | ❌ |
+
+### 3.5a — MAR + Vitals (this PR)
+
+- **Extractor schema lock:** `backend/src/lib/extraction/medMalExtractor.ts` system prompt now specifies the Mulder-rule `medications[]` shape (`{ name, dose, route, frequency, ordered_by, administered_by, ordered_at, administered_at, indication, allergy_conflict_flag, weight_based_dose_check_passed }`) and the `vitals` object shape (`{ bp, hr, rr, spo2, temp_c, map, urine_output_ml }`).
+- **Normalizer validators:** `coerceMedications` and `coerceVitals` in `backend/src/lib/extraction/eventLog.ts` drop malformed entries, count them under new `malformed_medications` / `malformed_vitals` reasons, and never persist unknown keys.
+- **Two new routes:** `/projects/[id]/mar/[docId]` and `/projects/[id]/vitals/[docId]`, mirroring `/timeline/[docId]` exactly. Read via the existing `GET /extraction/:documentId/events` — no new backend endpoints.
+- **Picker refactor:** the chronology multi-doc picker was inlined in `ProjectPage.tsx`. Extracted to `frontend/src/app/components/shared/DocPickerModal.tsx` and routed by `eventLogPicker.target ∈ {"timeline","mar","vitals"}` so the three lens buttons share one component.
+- **No SQL migration** — the columns already exist as `jsonb`.
+
+### 3.5b — Labs (deferred to follow-up PR)
+
+Adds `labs jsonb` to `document_events` (migration `0006_document_events_labs.sql`), extends the system prompt with a `labs[]` shape (`{ test_name, value, unit, normal_range, ordered_at, resulted_at, critical_value_flag, communicated_to }`), updates `MedMalDocumentEvent`, and ships `/projects/[id]/labs/[docId]/page.tsx` mirroring the MAR view. Existing test extractions must be re-run after the prompt change.
+
+### 3.5c — Bills (deferred, scope decision required)
+
+Bills don't fit on `document_events` cleanly — charges are per-line-item with their own date-of-service semantics, and `builtin-med-bills` has 16 columns that would bloat any single jsonb field. Likely solution is a sibling `document_charges` table (UUID PK, FK to `documents`, line-item columns, source bbox). Phase 3.5c is gated on agreeing the table shape before writing the migration.
 
 ## Phase 4 — v1.1 deadline tracking ⏳
 

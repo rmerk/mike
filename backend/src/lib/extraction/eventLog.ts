@@ -25,6 +25,37 @@ export type DocumentEventPrivacyClass =
     | "mental_health_144_293"
     | "substance_abuse_42_cfr_part_2";
 
+// Mulder-rule medication shape (per Reinhardt). Only `name` is required so the
+// row can still represent a medication mentioned in a chart entry that lacks
+// full administration metadata; downstream consumers (MAR view, red-flag
+// rules) treat the optional fields as best-effort.
+export type MedicationEntry = {
+    name: string;
+    dose?: string | null;
+    route?: string | null;
+    frequency?: string | null;
+    ordered_by?: string | null;
+    administered_by?: string | null;
+    ordered_at?: string | null;
+    administered_at?: string | null;
+    indication?: string | null;
+    allergy_conflict_flag?: boolean | null;
+    weight_based_dose_check_passed?: boolean | null;
+};
+
+// Vital signs captured on a single event. Strings used for `bp` because the
+// canonical chart format is "120/80"; everything else numeric. All optional —
+// not every encounter captures the full set.
+export type VitalsEntry = {
+    bp?: string | null;
+    hr?: number | null;
+    rr?: number | null;
+    spo2?: number | null;
+    temp_c?: number | null;
+    map?: number | null;
+    urine_output_ml?: number | null;
+};
+
 export type DocumentEventInsert = {
     document_id: string;
     extraction_run_id: string;
@@ -38,8 +69,8 @@ export type DocumentEventInsert = {
     privacy_class?: DocumentEventPrivacyClass;
     key_date_role?: string | null;
     dx_codes?: string[] | null;
-    medications?: unknown;
-    vitals?: unknown;
+    medications?: MedicationEntry[] | null;
+    vitals?: VitalsEntry | null;
     procedures?: string[] | null;
     narrative?: string | null;
     source_page: number;
@@ -68,6 +99,73 @@ const SAFE_PRIVACY_CLASSES: ReadonlySet<DocumentEventPrivacyClass> = new Set([
     "standard",
     "mental_health_144_293",
 ]);
+
+function coerceNullableString(value: unknown): string | null {
+    return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function coerceNullableNumber(value: unknown): number | null {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    return value;
+}
+
+function coerceNullableBoolean(value: unknown): boolean | null {
+    return typeof value === "boolean" ? value : null;
+}
+
+// Drop entries without a `name`. Extra/unknown keys are silently ignored so
+// the LLM emitting a superset shape does not poison the row.
+export function coerceMedications(value: unknown): MedicationEntry[] | null {
+    if (!Array.isArray(value)) return null;
+    const out: MedicationEntry[] = [];
+    for (const raw of value) {
+        if (!raw || typeof raw !== "object") continue;
+        const o = raw as Record<string, unknown>;
+        const name = coerceNullableString(o.name);
+        if (!name) continue;
+        out.push({
+            name,
+            dose: coerceNullableString(o.dose),
+            route: coerceNullableString(o.route),
+            frequency: coerceNullableString(o.frequency),
+            ordered_by: coerceNullableString(o.ordered_by),
+            administered_by: coerceNullableString(o.administered_by),
+            ordered_at: coerceNullableString(o.ordered_at),
+            administered_at: coerceNullableString(o.administered_at),
+            indication: coerceNullableString(o.indication),
+            allergy_conflict_flag: coerceNullableBoolean(o.allergy_conflict_flag),
+            weight_based_dose_check_passed: coerceNullableBoolean(
+                o.weight_based_dose_check_passed,
+            ),
+        });
+    }
+    return out.length > 0 ? out : null;
+}
+
+// Returns null if zero recognized fields, so the failure-to-monitor rule
+// continues to fire on truly empty vitals rather than seeing an empty object.
+export function coerceVitals(value: unknown): VitalsEntry | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const o = value as Record<string, unknown>;
+    const out: VitalsEntry = {
+        bp: coerceNullableString(o.bp),
+        hr: coerceNullableNumber(o.hr),
+        rr: coerceNullableNumber(o.rr),
+        spo2: coerceNullableNumber(o.spo2),
+        temp_c: coerceNullableNumber(o.temp_c),
+        map: coerceNullableNumber(o.map),
+        urine_output_ml: coerceNullableNumber(o.urine_output_ml),
+    };
+    const hasAny =
+        out.bp !== null ||
+        out.hr !== null ||
+        out.rr !== null ||
+        out.spo2 !== null ||
+        out.temp_c !== null ||
+        out.map !== null ||
+        out.urine_output_ml !== null;
+    return hasAny ? out : null;
+}
 
 // LLM-supplied privacy class is restricted to the values the model is
 // instructed to use. `substance_abuse_42_cfr_part_2` is reserved for
