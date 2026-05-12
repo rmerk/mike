@@ -20,8 +20,17 @@ type ChatToolCall = {
     function: { name: string; arguments: string };
 };
 
+// OpenAI-compatible chat-completions content block. NVIDIA NIM accepts
+// structured content arrays on the user role for multimodal models (Kimi
+// K2.5/K2.6, Llama-3.2 Vision). System / assistant / tool messages stay
+// plain string in this codebase.
+type UserContentBlock =
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } };
+
 type ChatMessage =
-    | { role: "system" | "user"; content: string }
+    | { role: "system"; content: string }
+    | { role: "user"; content: string | UserContentBlock[] }
     | { role: "assistant"; content: string | null; tool_calls?: ChatToolCall[] }
     | { role: "tool"; tool_call_id: string; content: string };
 
@@ -121,6 +130,25 @@ function parseToolCallArgs(raw: string): Record<string, unknown> {
     return {};
 }
 
+// Retry budget for non-stream requests against NIM. 429 (rate limit) and 5xx
+// are treated as transient; 4xx-other (auth, bad request) fails immediately.
+// Multi-hour extraction runs would otherwise abort on a single transient blip.
+const NVIDIA_MAX_RETRIES = (() => {
+    const raw = process.env.NVIDIA_MAX_RETRIES?.trim();
+    const fallback = 3;
+    if (!raw) return fallback;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 && n <= 10 ? n : fallback;
+})();
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+    return status === 408 || status === 429 || status >= 500;
+}
+
 async function postChat(params: {
     model: string;
     messages: ChatMessage[];
@@ -129,30 +157,69 @@ async function postChat(params: {
     maxTokens?: number;
     apiKey: string;
 }): Promise<Response> {
-    const response = await fetch(`${NVIDIA_CHAT_URL}/chat/completions`, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${params.apiKey}`,
-            "Content-Type": "application/json",
-            Accept: params.stream ? "text/event-stream" : "application/json",
-        },
-        body: JSON.stringify({
-            model: params.model,
-            messages: params.messages,
-            tools: params.tools?.length ? params.tools : undefined,
-            stream: params.stream,
-            max_tokens: params.maxTokens ?? MAX_OUTPUT_TOKENS,
-        }),
-    });
+    // Streaming responses cannot be retried in this layer — once bytes start
+    // flowing the caller is committed. Non-streaming (extraction-page) calls
+    // are eligible for retry.
+    const maxAttempts = params.stream ? 1 : NVIDIA_MAX_RETRIES + 1;
+    let lastErr: Error | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let response: Response;
+        try {
+            response = await fetch(`${NVIDIA_CHAT_URL}/chat/completions`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${params.apiKey}`,
+                    "Content-Type": "application/json",
+                    Accept: params.stream
+                        ? "text/event-stream"
+                        : "application/json",
+                },
+                body: JSON.stringify({
+                    model: params.model,
+                    messages: params.messages,
+                    tools: params.tools?.length ? params.tools : undefined,
+                    stream: params.stream,
+                    max_tokens: params.maxTokens ?? MAX_OUTPUT_TOKENS,
+                }),
+            });
+        } catch (e) {
+            // Network errors (DNS, ECONNRESET) are treated as transient.
+            lastErr = e instanceof Error ? e : new Error(String(e));
+            if (attempt < maxAttempts) {
+                const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 15000);
+                console.warn(
+                    `[nvidia/postChat] attempt ${attempt} network error; retrying in ${backoffMs}ms: ${lastErr.message}`,
+                );
+                await sleep(backoffMs);
+                continue;
+            }
+            throw lastErr;
+        }
 
-    if (!response.ok) {
+        if (response.ok) return response;
+
         const text = await response.text().catch(() => "");
-        throw new Error(
-            `NVIDIA request failed (${response.status}): ${text || response.statusText}`,
-        );
+        const errMsg = `NVIDIA request failed (${response.status}): ${text || response.statusText}`;
+        if (
+            attempt < maxAttempts &&
+            isRetryableStatus(response.status)
+        ) {
+            // Honor Retry-After when present; otherwise exponential backoff
+            // capped at 15s to stay within typical API timeouts.
+            const retryAfter = Number(response.headers.get("retry-after"));
+            const backoffMs = Number.isFinite(retryAfter) && retryAfter > 0
+                ? Math.min(retryAfter * 1000, 30000)
+                : Math.min(1000 * 2 ** (attempt - 1), 15000);
+            console.warn(
+                `[nvidia/postChat] attempt ${attempt} got ${response.status}; retrying in ${backoffMs}ms`,
+            );
+            await sleep(backoffMs);
+            lastErr = new Error(errMsg);
+            continue;
+        }
+        throw new Error(errMsg);
     }
-
-    return response;
+    throw lastErr ?? new Error("NVIDIA request failed (no response)");
 }
 
 export async function streamNvidia(
@@ -316,6 +383,49 @@ export async function completeNvidiaText(params: {
         messages,
         stream: false,
         maxTokens: params.maxTokens ?? 512,
+        apiKey: apiKey(params.apiKeys?.nvidia),
+    });
+    const json = (await response.json()) as {
+        choices?: { message?: { content?: string | null } }[];
+    };
+    return json.choices?.[0]?.message?.content ?? "";
+}
+
+/**
+ * Single-page multimodal extraction call for the med-mal pipeline. Signature
+ * intentionally mirrors `completeClaudeMedMalExtractionPage` so the dispatcher
+ * in `llm/index.ts` can route by provider without callers caring which
+ * vision-capable model is in use. The image is sent as a base64 data URL — NIM
+ * accepts the same `data:image/png;base64,...` convention as OpenAI / Kimi.
+ */
+export async function completeNvidiaMedMalExtractionPage(params: {
+    model: string;
+    systemPrompt: string;
+    userContent: string;
+    visionPngBase64?: string;
+    maxTokens?: number;
+    apiKeys?: { nvidia?: string | null };
+}): Promise<string> {
+    const userBlocks: UserContentBlock[] = [
+        { type: "text", text: params.userContent },
+    ];
+    if (params.visionPngBase64) {
+        userBlocks.push({
+            type: "image_url",
+            image_url: {
+                url: `data:image/png;base64,${params.visionPngBase64}`,
+            },
+        });
+    }
+    const messages: ChatMessage[] = [
+        { role: "system", content: params.systemPrompt },
+        { role: "user", content: userBlocks },
+    ];
+    const response = await postChat({
+        model: params.model,
+        messages,
+        stream: false,
+        maxTokens: params.maxTokens ?? 8192,
         apiKey: apiKey(params.apiKeys?.nvidia),
     });
     const json = (await response.json()) as {

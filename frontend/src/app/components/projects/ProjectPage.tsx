@@ -67,6 +67,7 @@ import { OwnerOnlyModal } from "@/app/components/shared/OwnerOnlyModal";
 import { useAuth } from "@/contexts/AuthContext";
 import { UploadNewVersionModal } from "@/app/components/shared/UploadNewVersionModal";
 import { DocViewModal } from "@/app/components/shared/DocViewModal";
+import { DocPickerModal } from "@/app/components/shared/DocPickerModal";
 import { AddNewTRModal } from "@/app/components/tabular/AddNewTRModal";
 import {
     BUILTIN_TABULAR_SCHEMAS,
@@ -340,11 +341,13 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
         title: string;
         columnsConfig: ColumnConfig[];
     } | null>(null);
-    // Picker for + Medical Chronology when the project has 2+ ready PDFs.
-    // Set to the candidate list; clicking a row navigates to the Timeline view.
-    const [chronologyPickerDocs, setChronologyPickerDocs] = useState<
-        MikeDocument[] | null
-    >(null);
+    // Picker for med-mal lens buttons (chronology / MAR / vitals) when the
+    // project has 2+ ready PDFs. `target` selects the route prefix; clicking
+    // a row navigates to `/projects/[id]/{target}/[docId]`.
+    const [eventLogPicker, setEventLogPicker] = useState<{
+        target: "timeline" | "mar" | "vitals";
+        docs: MikeDocument[];
+    } | null>(null);
 
     // Per-tab selection
     const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
@@ -1822,10 +1825,25 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                                                                 : schema.description
                                                         }
                                                         onClick={() => {
-                                                            if (
-                                                                schema.id ===
-                                                                "builtin-med-chronology"
-                                                            ) {
+                                                            // Map med-mal lens schemas to their dedicated event-log
+                                                            // views. For these IDs we bypass the LLM-backed tabular
+                                                            // modal and route straight to the read-from-event-log page.
+                                                            const lensTarget: Record<
+                                                                string,
+                                                                "timeline" | "mar" | "vitals"
+                                                            > = {
+                                                                "builtin-med-chronology":
+                                                                    "timeline",
+                                                                "builtin-med-mar":
+                                                                    "mar",
+                                                                "builtin-med-vitals-trend":
+                                                                    "vitals",
+                                                            };
+                                                            const target =
+                                                                lensTarget[
+                                                                    schema.id
+                                                                ];
+                                                            if (target) {
                                                                 const pdfReady =
                                                                     docsReady.filter(
                                                                         (d) =>
@@ -1843,7 +1861,7 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                                                                     1
                                                                 ) {
                                                                     router.push(
-                                                                        `/projects/${projectId}/timeline/${pdfReady[0].id}`,
+                                                                        `/projects/${projectId}/${target}/${pdfReady[0].id}`,
                                                                     );
                                                                     return;
                                                                 }
@@ -1851,8 +1869,11 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                                                                     pdfReady.length >
                                                                     1
                                                                 ) {
-                                                                    setChronologyPickerDocs(
-                                                                        pdfReady,
+                                                                    setEventLogPicker(
+                                                                        {
+                                                                            target,
+                                                                            docs: pdfReady,
+                                                                        },
                                                                     );
                                                                     return;
                                                                 }
@@ -2003,55 +2024,24 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                 initialColumnsConfig={recommendedReviewSeed?.columnsConfig}
             />
 
-            {chronologyPickerDocs && (
-                <div
-                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30"
-                    onClick={() => setChronologyPickerDocs(null)}
-                >
-                    <div
-                        className="bg-white rounded-md shadow-lg w-full max-w-md p-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <h2 className="text-sm font-semibold text-gray-900 mb-1">
-                            Pick a document
-                        </h2>
-                        <p className="text-xs text-gray-500 mb-3">
-                            The chronology view reads one record at a time. Choose which one to open.
-                        </p>
-                        <ul className="max-h-72 overflow-y-auto divide-y divide-gray-100 border border-gray-100 rounded">
-                            {chronologyPickerDocs.map((d) => (
-                                <li key={d.id}>
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setChronologyPickerDocs(null);
-                                            router.push(
-                                                `/projects/${projectId}/timeline/${d.id}`,
-                                            );
-                                        }}
-                                        className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 flex items-center justify-between gap-3"
-                                    >
-                                        <span className="truncate">{d.filename}</span>
-                                        <span className="text-gray-400 shrink-0">
-                                            {d.page_count
-                                                ? `${d.page_count} pp.`
-                                                : ""}
-                                        </span>
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                        <div className="mt-3 flex justify-end">
-                            <button
-                                type="button"
-                                onClick={() => setChronologyPickerDocs(null)}
-                                className="text-xs text-gray-500 hover:text-gray-700"
-                            >
-                                Cancel
-                            </button>
-                        </div>
-                    </div>
-                </div>
+            {eventLogPicker && (
+                <DocPickerModal
+                    docs={eventLogPicker.docs}
+                    title="Pick a document"
+                    description={
+                        eventLogPicker.target === "timeline"
+                            ? "The chronology view reads one record at a time. Choose which one to open."
+                            : eventLogPicker.target === "mar"
+                              ? "The MAR view reads one record at a time. Choose which one to open."
+                              : "The vitals view reads one record at a time. Choose which one to open."
+                    }
+                    onPick={(d) => {
+                        const target = eventLogPicker.target;
+                        setEventLogPicker(null);
+                        router.push(`/projects/${projectId}/${target}/${d.id}`);
+                    }}
+                    onCancel={() => setEventLogPicker(null)}
+                />
             )}
 
             <OwnerOnlyModal

@@ -1,10 +1,10 @@
 // Vision-based prescan for Minn. Stat. § 145.64 peer-review / QI markers on
 // pages whose text layer is empty (scanned images). Renders each candidate
-// page to a PNG, asks Claude whether any canonical marker phrase appears, and
-// caches the raster + base64 so the main extraction loop can reuse them
-// without re-rendering or re-uploading.
+// page to a PNG, asks the configured vision model whether any canonical
+// marker phrase appears, and caches the raster + base64 so the main
+// extraction loop can reuse them without re-rendering or re-uploading.
 
-import { completeClaudeMedMalExtractionPage } from "../llm";
+import { completeMedMalExtractionPage } from "../llm";
 import type { UserApiKeys } from "../llm/types";
 import { extractionPageRasterKey, uploadFile } from "../storage";
 import { PEER_REVIEW_MARKERS } from "./peerReviewMarkers";
@@ -22,7 +22,17 @@ export type VisionPrescanResult = {
     rasterCache: Map<number, RasterCacheEntry>;
 };
 
-const PRESCAN_CONCURRENCY = 4;
+// Default 8 (up from 4) because the prescan is the silent phase before the
+// main extraction loop and dominates time-to-first-page on large scanned PDFs
+// (a 3K-page Epic ebook can have hundreds of image-only pages). Override via
+// MED_MAL_PRESCAN_CONCURRENCY if the provider rate-limits.
+const PRESCAN_CONCURRENCY = (() => {
+    const raw = process.env.MED_MAL_PRESCAN_CONCURRENCY?.trim();
+    const fallback = 8;
+    if (!raw) return fallback;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 1 && n <= 32 ? n : fallback;
+})();
 const PRESCAN_MAX_REPAIR_ATTEMPTS = 2;
 
 function buildSystemPrompt(): string {
@@ -103,7 +113,7 @@ async function detectOnSinglePage(params: {
             attempt > 0
                 ? `\nYour previous output was invalid JSON. Emit ONLY the JSON object, no prose. Attempt ${attempt + 1}.`
                 : "";
-        const raw = await completeClaudeMedMalExtractionPage({
+        const raw = await completeMedMalExtractionPage({
             model,
             systemPrompt: systemPrompt + repair,
             userContent: `Page number: ${pageNum}\nA PNG image of this PDF page is attached. Determine whether any canonical § 145.64 marker phrase is visible.`,
