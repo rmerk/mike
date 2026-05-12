@@ -340,6 +340,11 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
         title: string;
         columnsConfig: ColumnConfig[];
     } | null>(null);
+    // Picker for + Medical Chronology when the project has 2+ ready PDFs.
+    // Set to the candidate list; clicking a row navigates to the Timeline view.
+    const [chronologyPickerDocs, setChronologyPickerDocs] = useState<
+        MikeDocument[] | null
+    >(null);
 
     // Per-tab selection
     const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
@@ -1817,6 +1822,43 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                                                                 : schema.description
                                                         }
                                                         onClick={() => {
+                                                            if (
+                                                                schema.id ===
+                                                                "builtin-med-chronology"
+                                                            ) {
+                                                                const pdfReady =
+                                                                    docsReady.filter(
+                                                                        (d) =>
+                                                                            (
+                                                                                d.file_type ??
+                                                                                ""
+                                                                            )
+                                                                                .toLowerCase()
+                                                                                .includes(
+                                                                                    "pdf",
+                                                                                ),
+                                                                    );
+                                                                if (
+                                                                    pdfReady.length ===
+                                                                    1
+                                                                ) {
+                                                                    router.push(
+                                                                        `/projects/${projectId}/timeline/${pdfReady[0].id}`,
+                                                                    );
+                                                                    return;
+                                                                }
+                                                                if (
+                                                                    pdfReady.length >
+                                                                    1
+                                                                ) {
+                                                                    setChronologyPickerDocs(
+                                                                        pdfReady,
+                                                                    );
+                                                                    return;
+                                                                }
+                                                                // 0 PDFs ready — fall through to existing modal so the user
+                                                                // sees the standard "upload a doc" guidance via AddNewTRModal.
+                                                            }
                                                             setRecommendedReviewSeed(
                                                                 {
                                                                     title: schema.title,
@@ -1960,6 +2002,57 @@ export function ProjectPage({ projectId, initialTab = "documents" }: Props) {
                 initialTitle={recommendedReviewSeed?.title}
                 initialColumnsConfig={recommendedReviewSeed?.columnsConfig}
             />
+
+            {chronologyPickerDocs && (
+                <div
+                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30"
+                    onClick={() => setChronologyPickerDocs(null)}
+                >
+                    <div
+                        className="bg-white rounded-md shadow-lg w-full max-w-md p-4"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h2 className="text-sm font-semibold text-gray-900 mb-1">
+                            Pick a document
+                        </h2>
+                        <p className="text-xs text-gray-500 mb-3">
+                            The chronology view reads one record at a time. Choose which one to open.
+                        </p>
+                        <ul className="max-h-72 overflow-y-auto divide-y divide-gray-100 border border-gray-100 rounded">
+                            {chronologyPickerDocs.map((d) => (
+                                <li key={d.id}>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setChronologyPickerDocs(null);
+                                            router.push(
+                                                `/projects/${projectId}/timeline/${d.id}`,
+                                            );
+                                        }}
+                                        className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 flex items-center justify-between gap-3"
+                                    >
+                                        <span className="truncate">{d.filename}</span>
+                                        <span className="text-gray-400 shrink-0">
+                                            {d.page_count
+                                                ? `${d.page_count} pp.`
+                                                : ""}
+                                        </span>
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                        <div className="mt-3 flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setChronologyPickerDocs(null)}
+                                className="text-xs text-gray-500 hover:text-gray-700"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <OwnerOnlyModal
                 open={!!ownerOnlyAction}
