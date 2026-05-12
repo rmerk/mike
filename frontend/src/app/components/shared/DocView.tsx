@@ -200,7 +200,16 @@ export function DocView({
             scrollToPage?: number,
         ) => {
             if (!containerRef.current) return;
-            containerRef.current.innerHTML = "";
+            // Release PDF.js page caches before dropping refs — they live
+            // in the worker and aren't GC'd by dropping the JS reference.
+            for (const p of renderedPagesRef.current) {
+                try {
+                    p.page.cleanup();
+                } catch {
+                    /* page may already be destroyed */
+                }
+            }
+            containerRef.current.replaceChildren();
             renderedPagesRef.current = [];
             const lib = await getPdfJs();
             lib.TextLayer.cleanup();
@@ -498,6 +507,7 @@ export function DocView({
         const list = quoteList;
 
         let cancelled = false;
+        let createdDoc: import("pdfjs-dist").PDFDocumentProxy | null = null;
         (async () => {
             const lib = await getPdfJs();
             if (cancelled) return;
@@ -505,12 +515,33 @@ export function DocView({
                 data: new Uint8Array(result.buffer),
                 standardFontDataUrl: STANDARD_FONT_DATA_URL,
             }).promise;
-            if (cancelled) return;
+            if (cancelled) {
+                // Cancellation arrived between resolve and assignment —
+                // we own the doc, so release it ourselves.
+                pdfDoc.destroy().catch(() => {});
+                return;
+            }
+            createdDoc = pdfDoc;
             pdfDocRef.current = pdfDoc;
             await renderPDF(pdfDoc, list);
         })();
         return () => {
             cancelled = true;
+            // Release page-level caches before destroying the parent doc.
+            for (const p of renderedPagesRef.current) {
+                try {
+                    p.page.cleanup();
+                } catch {
+                    /* page may already be destroyed */
+                }
+            }
+            renderedPagesRef.current = [];
+            if (createdDoc) {
+                createdDoc.destroy().catch(() => {});
+                if (pdfDocRef.current === createdDoc) {
+                    pdfDocRef.current = null;
+                }
+            }
         };
     }, [result, renderPDF]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -533,14 +564,27 @@ export function DocView({
         rehighlightQuotes(quoteList);
     }, [quoteKey, rehighlightQuotes]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Update only the bbox overlay on bbox changes — full re-renders here
+    // would re-create every page canvas (10GB+ on a 3000-page Epic) and
+    // leak the prior PDFPageProxy set.
+    const applyBboxOverlay = useCallback(() => {
+        const pages = renderedPagesRef.current;
+        for (const p of pages) {
+            clearBboxOverlays(p.wrapper);
+        }
+        const bh = bboxHighlightRef.current;
+        if (!bh || bh.page < 1 || bh.page > pages.length) return;
+        const entry = pages[bh.page - 1];
+        if (!entry) return;
+        placePdfBboxOverlay(entry.wrapper, entry.viewport, bh);
+        scrollToHighlightOnPage(bh.page);
+    }, []);
+
     useEffect(() => {
         if (!pdfDocRef.current) return;
-        void renderPDF(
-            pdfDocRef.current,
-            quoteListRef.current,
-            currentPageRef.current,
-        );
-    }, [bboxKey, renderPDF]);
+        if (renderedPagesRef.current.length === 0) return;
+        applyBboxOverlay();
+    }, [bboxKey, applyBboxOverlay]);
 
     function handleZoomIn() {
         const next = Math.min(
