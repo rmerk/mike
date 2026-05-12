@@ -367,7 +367,13 @@ export interface MedMalDocumentEvent {
   narrative: string | null;
   encounter_type: string | null;
   event_date: string | null;
+  event_time?: string | null;
+  event_date_text?: string | null;
+  provider?: string | null;
+  provider_role?: string | null;
+  episode_of_care?: string | null;
   privacy_class?: string;
+  key_date_role?: string | null;
 }
 
 export type MedMalRedFlagSeverity = "low" | "medium" | "high";
